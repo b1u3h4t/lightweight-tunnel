@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -366,26 +365,4 @@ func GetPeerIP(tunnelAddr string) (string, error) {
 	}
 
 	return fmt.Sprintf("%s/%s", ip4.String(), parts[1]), nil
-}
-
-// encodePacket encodes packet with FEC (placeholder for future enhancement)
-func (t *Tunnel) encodePacket(data []byte) []byte {
-	// Simple passthrough for now, FEC can be added later
-	return data
-}
-
-// decodePacket decodes packet with FEC (placeholder for future enhancement)
-func (t *Tunnel) decodePacket(data []byte) ([]byte, error) {
-	// Simple passthrough for now, FEC can be added later
-	return data, nil
-}
-
-func encodeUint32(v uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	return b
-}
-
-func decodeUint32(b []byte) uint32 {
-	return binary.BigEndian.Uint32(b)
 }
