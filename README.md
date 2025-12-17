@@ -9,6 +9,9 @@
 - 🔐 **TLS 加密** - 可选的 TLS 加密保护流量不被运营商检查
 - 🛡️ **FEC 纠错** - 自动纠正丢包，提升弱网环境下的稳定性
 - 🌐 **多客户端** - 支持多个客户端同时连接，客户端之间可互相通信
+- 🔄 **P2P 直连** - 支持客户端之间 P2P 直接连接，无需服务器中转
+- 🧠 **智能路由** - 自动选择最优路径：P2P、中继或服务器转发
+- 🌐 **网状网络** - 支持通过其他客户端中继流量，实现多跳转发
 - ⚡ **高性能** - 基于 Go 协程实现高并发处理
 - 🎯 **简单易用** - 支持命令行和配置文件两种方式
 
@@ -114,6 +117,39 @@ ping 10.0.0.3
 ssh user@10.0.0.4
 ```
 
+#### 场景四：P2P 直连模式（新功能）
+
+启用 P2P 模式，客户端之间会自动尝试建立直接连接，无需通过服务器中转：
+
+**服务端：**
+```bash
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
+```
+
+**客户端 1（启用 P2P）：**
+```bash
+sudo ./lightweight-tunnel -m client -r <服务器IP>:9000 -t 10.0.0.2/24 -p2p
+```
+
+**客户端 2（启用 P2P）：**
+```bash
+sudo ./lightweight-tunnel -m client -r <服务器IP>:9000 -t 10.0.0.3/24 -p2p
+```
+
+P2P 连接建立后：
+- 流量直接在客户端之间传输，延迟更低
+- 减少服务器带宽和 CPU 负载
+- P2P 失败时自动回退到服务器转发
+
+**查看路由状态：**
+```bash
+# 日志会显示路由统计
+Routing stats: 2 peers, 1 direct, 0 relay, 1 server
+# 表示：2个对等节点，1个P2P直连，0个中继，1个服务器路由
+```
+
+详细文档请参阅：[P2P_ROUTING.md](P2P_ROUTING.md)
+
 ### 使用配置文件
 
 #### 生成示例配置
@@ -165,9 +201,21 @@ ssh user@10.0.0.4
   "send_queue_size": 1000,
   "recv_queue_size": 1000,
   "tls_enabled": false,
-  "tls_skip_verify": false
+  "tls_skip_verify": false,
+  "p2p_enabled": true,
+  "p2p_port": 0,
+  "enable_mesh_routing": true,
+  "max_hops": 3,
+  "route_update_interval": 30
 }
 ```
+
+**P2P 配置说明：**
+- `p2p_enabled`：启用 P2P 直连（默认：true）
+- `p2p_port`：UDP 端口，0 表示自动选择
+- `enable_mesh_routing`：启用网状路由（默认：true）
+- `max_hops`：最大跳数（默认：3）
+- `route_update_interval`：路由更新间隔秒数（默认：30）
 
 #### 使用配置文件运行
 
@@ -194,6 +242,11 @@ sudo ./lightweight-tunnel -c config.json
 | `-multi-client` | 启用多客户端支持（服务端） | true |
 | `-max-clients` | 最大客户端数量（服务端） | 100 |
 | `-client-isolation` | 客户端隔离模式 | false |
+| `-p2p` | 启用 P2P 直连 | true |
+| `-p2p-port` | P2P UDP 端口（0=自动） | 0 |
+| `-mesh-routing` | 启用网状路由 | true |
+| `-max-hops` | 最大跳数 | 3 |
+| `-route-update` | 路由更新间隔（秒） | 30 |
 | `-tls` | 启用 TLS 加密 | false |
 | `-tls-cert` | TLS 证书文件（服务端） | - |
 | `-tls-key` | TLS 私钥文件（服务端） | - |
@@ -323,6 +376,8 @@ sudo kill -9 PID
 3. **TLS 加密：** 可选的端到端加密，防止运营商检查内容
 4. **FEC 纠错：** 添加冗余数据分片，自动恢复丢失的数据包
 5. **保活机制：** 定期发送心跳包维持连接
+6. **P2P 直连：** 使用 UDP 打洞技术建立客户端之间的直接连接
+7. **智能路由：** 根据连接质量自动选择最优路径（P2P/中继/服务器）
 
 ## 架构图
 
@@ -350,7 +405,8 @@ sudo kill -9 PID
 - 需要 root 权限创建 TUN 设备
 - 仅支持 Linux 系统
 - 默认不加密，需手动启用 TLS
-- 所有流量经过服务端中转
+- 所有流量经过服务端中转（可通过 P2P 模式避免）
+- P2P 需要 UDP 端口支持（可能被防火墙阻止）
 
 ## 安全建议
 
