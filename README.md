@@ -100,7 +100,9 @@ Example server configuration:
   "fec_data": 10,
   "fec_parity": 3,
   "timeout": 30,
-  "keepalive": 10
+  "keepalive": 10,
+  "send_queue_size": 1000,
+  "recv_queue_size": 1000
 }
 ```
 
@@ -116,7 +118,9 @@ Example client configuration:
   "fec_data": 10,
   "fec_parity": 3,
   "timeout": 30,
-  "keepalive": 10
+  "keepalive": 10,
+  "send_queue_size": 1000,
+  "recv_queue_size": 1000
 }
 ```
 
@@ -139,6 +143,10 @@ Example client configuration:
         FEC data shards (default 10)
   -fec-parity int
         FEC parity shards (default 3)
+  -send-queue int
+        Send queue buffer size (default 1000)
+  -recv-queue int
+        Receive queue buffer size (default 1000)
   -tls
         Enable TLS encryption (recommended for security)
   -tls-cert string
@@ -196,6 +204,10 @@ ping 10.0.0.1
 - **MTU**: Adjust based on your network (default: 1400)
 - **FEC Shards**: More parity shards = better loss recovery but more overhead
 - **Keepalive**: Shorter interval = faster detection of disconnection
+- **Queue Sizes**: Increase `send_queue_size` and `recv_queue_size` for high-throughput scenarios to prevent packet drops (default: 1000 each)
+  - If you see "Send queue full, dropping packet" errors, increase the queue sizes
+  - Higher values use more memory but handle traffic bursts better
+  - Typical values: 1000-5000 for normal use, 5000-10000 for high-bandwidth tunnels
 
 ## Limitations (限制)
 
