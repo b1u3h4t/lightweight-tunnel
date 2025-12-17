@@ -54,6 +54,12 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
+	// First unmarshal to a map to check which fields are explicitly set
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
+		return nil, err
+	}
+
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
@@ -84,9 +90,14 @@ func LoadConfig(filename string) (*Config, error) {
 	if config.MaxClients == 0 {
 		config.MaxClients = 100
 	}
-	// Note: MultiClient and ClientIsolation default to false when loaded from JSON
-	// The command-line interface and DefaultConfig() set MultiClient=true by default
-	// Explicitly set "multi_client": true in JSON config for multi-client support
+	
+	// Default multi_client to true for server mode if not explicitly set
+	// This matches the command-line default and expected behavior
+	if config.Mode == "server" {
+		if _, exists := rawConfig["multi_client"]; !exists {
+			config.MultiClient = true
+		}
+	}
 
 	return &config, nil
 }

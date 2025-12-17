@@ -12,5 +12,8 @@
   "recv_queue_size": 1000,
   "tls_enabled": false,
   "tls_cert_file": "/path/to/server.crt",
-  "tls_key_file": "/path/to/server.key"
+  "tls_key_file": "/path/to/server.key",
+  "multi_client": true,
+  "max_clients": 100,
+  "client_isolation": false
 }

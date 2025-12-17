@@ -12,5 +12,8 @@
   "recv_queue_size": 1000,
   "tls_enabled": true,
   "tls_cert_file": "/etc/lightweight-tunnel/server.crt",
-  "tls_key_file": "/etc/lightweight-tunnel/server.key"
+  "tls_key_file": "/etc/lightweight-tunnel/server.key",
+  "multi_client": true,
+  "max_clients": 100,
+  "client_isolation": false
 }
