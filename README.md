@@ -1,100 +1,134 @@
-# Lightweight Tunnel (轻量级内网隧道)
+# 轻量级内网隧道
 
-一个使用 Go 语言开发的轻量级内网隧道工具，支持 TCP 伪装和 FEC 纠错功能。适用于在两个低配置服务器之间建立安全的内网连接。
+一个使用 Go 语言开发的轻量级内网隧道工具，支持 TCP 伪装和 FEC 纠错功能，适用于在多个服务器之间建立安全的虚拟内网连接。
 
-A lightweight intranet tunnel tool developed in Go, supporting TCP disguise and FEC (Forward Error Correction). Suitable for establishing secure intranet connections between two low-spec servers.
+## 主要特性
 
-## Features (特性)
+- 🚀 **轻量高效** - 资源占用少，适合低配置服务器
+- 🔒 **TCP 伪装** - 数据包伪装成普通 TCP 连接，可穿透防火墙
+- 🔐 **TLS 加密** - 可选的 TLS 加密保护流量不被运营商检查
+- 🛡️ **FEC 纠错** - 自动纠正丢包，提升弱网环境下的稳定性
+- 🌐 **多客户端** - 支持多个客户端同时连接，客户端之间可互相通信
+- ⚡ **高性能** - 基于 Go 协程实现高并发处理
+- 🎯 **简单易用** - 支持命令行和配置文件两种方式
 
-- 🚀 **轻量级设计** - 占用资源少，适合低配置服务器
-- 🔒 **TCP 伪装** - UDP 数据包伪装成 TCP 连接，绕过防火墙限制
-- 🔐 **TLS 加密** - 可选的 TLS 加密保护数据不被 ISP 检查
-- 🛡️ **FEC 纠错** - Forward Error Correction 提供数据包丢失恢复能力
-- 🌐 **TUN 设备** - 基于 TUN 设备的第三层网络隧道
-- ⚡ **高性能** - 使用 Go 协程实现并发处理
-- 🎯 **简单易用** - 命令行参数或配置文件两种配置方式
+## ⚠️ 安全提醒
 
-## Quick Start (快速开始)
+**默认情况下，隧道流量是明文传输的**，运营商和网络设备可以查看所有内容。生产环境务必启用 TLS 加密！详见 [SECURITY.md](SECURITY.md)。
 
-### Prerequisites (前置要求)
+## 快速开始
 
-- Linux 系统 (需要 TUN 设备支持)
-- Root 权限 (用于创建和配置 TUN 设备)
-- Go 1.19+ (仅编译时需要)
+### 系统要求
 
-## ⚠️ Security Notice (安全提醒)
+- Linux 系统（需要 TUN 设备支持）
+- Root 权限（用于创建和配置 TUN 设备）
+- Go 1.19+ （仅编译时需要）
 
-**English**: By default, this tunnel transmits data in **plaintext** without encryption. ISPs and network operators can view and log all tunnel content. **For secure communication, always enable TLS encryption** using the `-tls` flag. See [SECURITY.md](SECURITY.md) for details.
-
-**中文**: 默认情况下，此隧道以**明文**传输数据，不进行加密。运营商和网络设备可以查看和记录所有隧道内容。**要进行安全通信，请始终使用 `-tls` 标志启用 TLS 加密**。详见 [SECURITY.md](SECURITY.md)。
-
-### Installation (安装)
+### 安装
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/openbmx/lightweight-tunnel.git
 cd lightweight-tunnel
 
-# Build
+# 编译
 go build -o lightweight-tunnel ./cmd/lightweight-tunnel
 
-# Or install directly
+# 或者直接安装
 go install ./cmd/lightweight-tunnel
 ```
 
-### Usage (使用方法)
+### 基本使用
 
-#### Server Side (服务端)
+#### 场景一：简单的点对点连接（测试用）
 
-**Without TLS (insecure - traffic visible to ISPs):**
+**服务端：**
 ```bash
-# Run as server with default settings
 sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
 ```
 
-**With TLS (recommended - encrypted traffic):**
+**客户端：**
 ```bash
-# Generate certificates first (for testing only)
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.2/24
+```
+
+**测试连接：**
+```bash
+# 在客户端执行
+ping 10.0.0.1
+```
+
+#### 场景二：使用 TLS 加密（推荐）
+
+**1. 生成证书（测试用）：**
+```bash
 ./examples/generate-certs.sh
-
-# Run server with TLS
-sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24 -tls -tls-cert certs/server.crt -tls-key certs/server.key
 ```
 
-#### Client Side (客户端)
-
-**Without TLS (insecure):**
+**2. 启动服务端：**
 ```bash
-# Run as client
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.2/24
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24 \
+  -tls -tls-cert certs/server.crt -tls-key certs/server.key
 ```
 
-**With TLS (recommended):**
+**3. 启动客户端：**
 ```bash
-# With self-signed certificates (testing only)
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.2/24 -tls -tls-skip-verify
+# 使用自签名证书（测试环境）
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.2/24 \
+  -tls -tls-skip-verify
 
-# With valid certificates (production)
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.2/24 -tls
+# 使用正式证书（生产环境）
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.2/24 -tls
 ```
 
-### Configuration File (配置文件)
+#### 场景三：多客户端组网
 
-Generate example configuration files:
+服务端默认支持多客户端连接，所有客户端可以互相通信：
+
+**服务端：**
+```bash
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
+```
+
+**客户端 1：**
+```bash
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.2/24
+```
+
+**客户端 2：**
+```bash
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.3/24
+```
+
+**客户端 3：**
+```bash
+sudo ./lightweight-tunnel -m client -r 服务器IP:9000 -t 10.0.0.4/24
+```
+
+连接后，客户端之间可以直接通信：
+```bash
+# 在客户端 1 上 ping 客户端 2
+ping 10.0.0.3
+
+# 在客户端 1 上 SSH 到客户端 3
+ssh user@10.0.0.4
+```
+
+### 使用配置文件
+
+#### 生成示例配置
 
 ```bash
 ./lightweight-tunnel -g config.json
+# 会生成 config.json（服务端）和 config.json.client（客户端）
 ```
 
-This creates `config.json` (server) and `config.json.client` (client).
-
-Example server configuration:
+#### 服务端配置示例
 
 ```json
 {
   "mode": "server",
   "local_addr": "0.0.0.0:9000",
-  "remote_addr": "",
   "tunnel_addr": "10.0.0.1/24",
   "mtu": 1400,
   "fec_data": 10,
@@ -105,19 +139,23 @@ Example server configuration:
   "recv_queue_size": 1000,
   "multi_client": true,
   "max_clients": 100,
-  "client_isolation": false
+  "client_isolation": false,
+  "tls_enabled": false,
+  "tls_cert_file": "/path/to/server.crt",
+  "tls_key_file": "/path/to/server.key"
 }
 ```
 
-**Note**: If `multi_client` is not specified in server configuration files, it defaults to `true` to enable multiple simultaneous client connections. To disable multi-client support, explicitly set `"multi_client": false`.
+**重要说明：**
+- `multi_client`：未指定时默认为 `true`，允许多个客户端同时连接
+- 如需限制为单客户端模式，显式设置为 `false`
 
-Example client configuration:
+#### 客户端配置示例
 
 ```json
 {
   "mode": "client",
-  "local_addr": "0.0.0.0:9000",
-  "remote_addr": "SERVER_IP:9000",
+  "remote_addr": "服务器IP:9000",
   "tunnel_addr": "10.0.0.2/24",
   "mtu": 1400,
   "fec_data": 10,
@@ -125,199 +163,212 @@ Example client configuration:
   "timeout": 30,
   "keepalive": 10,
   "send_queue_size": 1000,
-  "recv_queue_size": 1000
+  "recv_queue_size": 1000,
+  "tls_enabled": false,
+  "tls_skip_verify": false
 }
 ```
 
-## Command Line Options (命令行选项)
-
-```
-  -c string
-        Configuration file path
-  -m string
-        Mode: server or client (default "server")
-  -l string
-        Local address to listen on (default "0.0.0.0:9000")
-  -r string
-        Remote address to connect to (client mode)
-  -t string
-        Tunnel IP address and netmask (default "10.0.0.1/24")
-  -mtu int
-        MTU size (default 1400)
-  -fec-data int
-        FEC data shards (default 10)
-  -fec-parity int
-        FEC parity shards (default 3)
-  -send-queue int
-        Send queue buffer size (default 1000)
-  -recv-queue int
-        Receive queue buffer size (default 1000)
-  -multi-client
-        Enable multi-client support (server mode, default true)
-  -max-clients int
-        Maximum number of concurrent clients (server mode, default 100)
-  -client-isolation
-        Enable client isolation mode (clients cannot communicate with each other)
-  -tls
-        Enable TLS encryption (recommended for security)
-  -tls-cert string
-        TLS certificate file (server mode)
-  -tls-key string
-        TLS private key file (server mode)
-  -tls-skip-verify
-        Skip TLS certificate verification (client mode, insecure)
-  -v    Show version
-  -g string
-        Generate example config file
-```
-
-## Architecture (架构)
-
-```
-┌─────────────┐         TCP (disguised)         ┌─────────────┐
-│   Server    │ ◄─────────────────────────────► │   Client    │
-│  (10.0.0.1) │    with FEC error correction    │  (10.0.0.2) │
-└──────┬──────┘                                  └──────┬──────┘
-       │                                                │
-       │ TUN Device                            TUN Device │
-       │                                                │
-  ┌────▼────┐                                      ┌────▼────┐
-  │ App/Svc │                                      │ App/Svc │
-  └─────────┘                                      └─────────┘
-```
-
-## How It Works (工作原理)
-
-1. **TUN Device**: Creates a virtual network interface for Layer 3 (IP) traffic
-2. **TCP Disguise**: Wraps UDP-like packets in TCP connections to bypass firewalls
-3. **TLS Encryption**: Optional end-to-end encryption to protect data from ISP inspection
-4. **FEC**: Adds redundant data shards for packet loss recovery
-5. **Keepalive**: Maintains connection with periodic heartbeat packets
-
-## Testing (测试)
-
-After establishing the tunnel, you can test connectivity:
+#### 使用配置文件运行
 
 ```bash
-# On server side, ping client
-ping 10.0.0.2
-
-# On client side, ping server
-ping 10.0.0.1
-
-# Test with iperf
-# Server: iperf -s
-# Client: iperf -c 10.0.0.1
+sudo ./lightweight-tunnel -c config.json
 ```
 
-## Performance Tuning (性能调优)
+## 配置说明
 
-- **MTU**: Adjust based on your network (default: 1400)
-- **FEC Shards**: More parity shards = better loss recovery but more overhead
-- **Keepalive**: Shorter interval = faster detection of disconnection
-- **Queue Sizes**: Increase `send_queue_size` and `recv_queue_size` for high-throughput scenarios to prevent packet drops (default: 1000 each)
-  - If you see "Send queue full, dropping packet" errors, increase the queue sizes
-  - Higher values use more memory but handle traffic bursts better
-  - Typical values: 1000-5000 for normal use, 5000-10000 for high-bandwidth tunnels
+### 命令行参数
 
-## Multi-Client Support (多客户端支持)
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-c` | 配置文件路径 | - |
+| `-m` | 模式：server 或 client | server |
+| `-l` | 监听地址（服务端） | 0.0.0.0:9000 |
+| `-r` | 服务器地址（客户端） | - |
+| `-t` | 隧道 IP 地址和子网掩码 | 10.0.0.1/24 |
+| `-mtu` | MTU 大小 | 1400 |
+| `-fec-data` | FEC 数据分片数 | 10 |
+| `-fec-parity` | FEC 校验分片数 | 3 |
+| `-send-queue` | 发送队列大小 | 1000 |
+| `-recv-queue` | 接收队列大小 | 1000 |
+| `-multi-client` | 启用多客户端支持（服务端） | true |
+| `-max-clients` | 最大客户端数量（服务端） | 100 |
+| `-client-isolation` | 客户端隔离模式 | false |
+| `-tls` | 启用 TLS 加密 | false |
+| `-tls-cert` | TLS 证书文件（服务端） | - |
+| `-tls-key` | TLS 私钥文件（服务端） | - |
+| `-tls-skip-verify` | 跳过证书验证（客户端，不安全） | false |
+| `-v` | 显示版本 | - |
+| `-g` | 生成示例配置文件 | - |
 
-**NEW**: Server now supports multiple simultaneous client connections!
+### 多客户端配置选项
 
-### Hub Mode
-
-The server operates as a hub/switch, allowing multiple clients to connect and communicate with each other:
-
-```
-                    Server (10.0.0.1)
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-   Client 1          Client 2          Client 3
-  (10.0.0.2)        (10.0.0.3)        (10.0.0.4)
-        │                │                │
-        └────────────────┴────────────────┘
-              Can communicate with each other
-```
-
-### Setup Example
-
-**Server:**
+**Hub 模式（默认）：** 所有客户端可以互相通信
 ```bash
-sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24 -multi-client
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
 ```
 
-**Client 1:**
-```bash
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.2/24
-```
-
-**Client 2:**
-```bash
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.3/24
-```
-
-**Client 3:**
-```bash
-sudo ./lightweight-tunnel -m client -r SERVER_IP:9000 -t 10.0.0.4/24
-```
-
-### Client-to-Client Communication
-
-Once connected, clients can directly communicate:
-
-```bash
-# On Client 1, ping Client 2
-ping 10.0.0.3
-
-# On Client 2, ssh to Client 3
-ssh user@10.0.0.4
-
-# On Client 1, access service on Client 3
-curl http://10.0.0.4:8080
-```
-
-### Configuration Options
-
-- `-multi-client`: Enable multi-client support (default: true)
-- `-max-clients`: Maximum concurrent clients (default: 100)
-- `-client-isolation`: Enable client isolation mode (clients can only talk to server, not each other)
-
-### Client Isolation Mode
-
-If you want clients to only communicate with the server (not with each other):
-
+**客户端隔离模式：** 客户端只能与服务端通信，不能互访
 ```bash
 sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24 -client-isolation
 ```
 
-## Limitations (限制)
+**单客户端模式：** 只允许一个客户端连接
+```bash
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24 -multi-client=false
+```
 
-- Currently supports only IPv4
-- Requires root/admin privileges for TUN device
-- Linux only (uses Linux TUN/TAP interfaces)
-- **No encryption by default** - enable TLS for secure communication
-- All traffic flows through server (server can be a bottleneck)
+## 性能调优
 
-## Security (安全)
+### 高速网络环境
 
-For detailed security information, including:
-- ISP visibility and Deep Packet Inspection (DPI)
-- TLS encryption setup
-- GFW and network monitoring considerations
-- Threat model and best practices
+```bash
+# 增大 MTU
+sudo ./lightweight-tunnel -mtu 8000 ...
 
-Please read [SECURITY.md](SECURITY.md)
+# 减少 FEC 开销
+sudo ./lightweight-tunnel -fec-data 20 -fec-parity 2 ...
+```
 
-## References (参考项目)
+### 高丢包网络环境
 
-- [udp2raw](https://github.com/wangyu-/udp2raw) - UDP to TCP converter
-- [tinyfecvpn](https://github.com/wangyu-/tinyfecVPN) - VPN with FEC
+```bash
+# 增加 FEC 冗余
+sudo ./lightweight-tunnel -fec-data 10 -fec-parity 5 ...
 
-## License
+# 减小 MTU
+sudo ./lightweight-tunnel -mtu 1200 ...
+```
+
+### 高带宽场景
+
+如果看到 "Send queue full, dropping packet" 错误，增大队列：
+```bash
+sudo ./lightweight-tunnel -send-queue 5000 -recv-queue 5000 ...
+```
+
+建议值：
+- 普通使用：1000-5000
+- 高带宽隧道：5000-10000
+
+## 常见问题
+
+### 权限错误
+
+**问题：** `failed to open /dev/net/tun: permission denied`
+
+**解决：** 使用 root 权限运行
+```bash
+sudo ./lightweight-tunnel ...
+```
+
+### TUN 设备不存在
+
+**问题：** `/dev/net/tun: no such file or directory`
+
+**解决：** 加载 TUN 模块
+```bash
+sudo modprobe tun
+```
+
+### 无法连接服务器
+
+**排查步骤：**
+1. 检查服务端是否运行：`netstat -tlnp | grep 9000`
+2. 检查防火墙：`sudo ufw allow 9000/tcp`
+3. 验证服务器 IP 地址是否正确
+4. 测试网络连通性：`ping 服务器IP`
+
+### 第二个客户端连接失败（EOF/Broken Pipe）
+
+**问题：** 第二个客户端报错 "Network read error: EOF" 或 "write: broken pipe"
+
+**原因：** 服务端配置为单客户端模式（`multi_client: false`）
+
+**解决方案：**
+
+使用 JSON 配置文件时：
+```json
+{
+  "mode": "server",
+  "local_addr": "0.0.0.0:9000",
+  "tunnel_addr": "10.0.0.1/24",
+  "multi_client": true,
+  "max_clients": 100
+}
+```
+
+使用命令行时（默认已启用）：
+```bash
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
+```
+
+### 端口被占用
+
+**问题：** `bind: address already in use`
+
+**解决：** 查找并关闭占用端口的进程
+```bash
+# 查找进程
+sudo lsof -i :9000
+
+# 终止进程
+sudo kill -9 PID
+```
+
+## 工作原理
+
+1. **TUN 设备：** 创建虚拟网卡，处理三层 IP 数据包
+2. **TCP 伪装：** 将数据包封装在 TCP 连接中，穿透防火墙
+3. **TLS 加密：** 可选的端到端加密，防止运营商检查内容
+4. **FEC 纠错：** 添加冗余数据分片，自动恢复丢失的数据包
+5. **保活机制：** 定期发送心跳包维持连接
+
+## 架构图
+
+```
+                    服务端 (10.0.0.1)
+                          │
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+   客户端 1           客户端 2           客户端 3
+  (10.0.0.2)        (10.0.0.3)        (10.0.0.4)
+        │                 │                 │
+        └─────────────────┴─────────────────┘
+              可以互相通信（Hub 模式）
+
+          TCP 连接（可选 TLS 加密）
+              ↓
+        FEC 纠错 + TCP 伪装
+              ↓
+         TUN 虚拟网卡
+```
+
+## 限制说明
+
+- 目前仅支持 IPv4
+- 需要 root 权限创建 TUN 设备
+- 仅支持 Linux 系统
+- 默认不加密，需手动启用 TLS
+- 所有流量经过服务端中转
+
+## 安全建议
+
+更多安全信息请参阅 [SECURITY.md](SECURITY.md)，包括：
+- 运营商可见性和深度包检测（DPI）
+- TLS 加密配置
+- GFW 和网络监控考量
+- 威胁模型和最佳实践
+
+## 参考项目
+
+- [udp2raw](https://github.com/wangyu-/udp2raw) - UDP 到 TCP 转换工具
+- [tinyfecvpn](https://github.com/wangyu-/tinyfecVPN) - 带 FEC 的 VPN
+
+## 开源协议
 
 MIT License
 
-## Contributing
+## 贡献指南
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+欢迎提交 Pull Request 和 Issue！
