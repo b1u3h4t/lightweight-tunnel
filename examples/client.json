@@ -1,0 +1,11 @@
+{
+  "mode": "client",
+  "local_addr": "0.0.0.0:9000",
+  "remote_addr": "YOUR_SERVER_IP:9000",
+  "tunnel_addr": "10.0.0.2/24",
+  "mtu": 1400,
+  "fec_data": 10,
+  "fec_parity": 3,
+  "timeout": 30,
+  "keepalive": 10
+}
