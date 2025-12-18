@@ -124,16 +124,11 @@ func main() {
 		log.Printf("Client Isolation: %v", cfg.ClientIsolation)
 	}
 	if cfg.Key != "" {
-		log.Println("🔐 Encryption: Enabled (AES-256-GCM)")
+		log.Println("🔐  Encryption: Enabled (AES-256-GCM)")
 	} else {
 		log.Println("⚠️  WARNING: No encryption key set (-k) - traffic is NOT encrypted")
 		log.Println("⚠️  Anyone can connect to this tunnel without authentication")
 		log.Println("⚠️  Use -k <key> to enable encryption and prevent unauthorized access")
-	}
-	log.Printf("TLS Encryption: %v", cfg.TLSEnabled)
-	if !cfg.TLSEnabled && cfg.Key == "" {
-		log.Println("⚠️  WARNING: Both TLS and key encryption are disabled")
-		log.Println("⚠️  ISPs and network operators can view and log all tunnel content")
 	}
 
 	// Create tunnel
