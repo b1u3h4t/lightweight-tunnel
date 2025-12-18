@@ -492,6 +492,16 @@ func (t *Tunnel) tunReader() {
 		}
 
 		if n > 0 {
+			// Skip packets that are too small or not IPv4
+			if n < IPv4MinHeaderLen {
+				continue
+			}
+			
+			// Check if packet is IPv4 (skip non-IPv4 packets like IPv6)
+			if buf[0]>>4 != IPv4Version {
+				continue
+			}
+			
 			// Copy packet data
 			packet := make([]byte, n)
 			copy(packet, buf[:n])
