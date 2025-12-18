@@ -276,7 +276,9 @@ func (t *Tunnel) addClient(client *ClientConnection, ip net.IP) {
 		log.Printf("Warning: IP conflict detected for %s, closing old connection", ipStr)
 		existing.stopOnce.Do(func() {
 			// Close connection first to unblock I/O
-			existing.conn.Close()
+			if err := existing.conn.Close(); err != nil {
+				log.Printf("Error closing conflicting connection: %v", err)
+			}
 			// Then signal goroutines to stop
 			close(existing.stopCh)
 		})
@@ -1167,7 +1169,12 @@ func (t *Tunnel) announcePeerInfo() error {
 	p2pPort := t.p2pManager.GetLocalPort()
 	
 	// Get our local address - use LocalAddr() which returns net.Addr
-	localAddrStr := t.conn.LocalAddr().String()
+	localAddr := t.conn.LocalAddr()
+	if localAddr == nil {
+		return fmt.Errorf("connection has no local address")
+	}
+	localAddrStr := localAddr.String()
+	
 	// Parse to extract IP (format is "IP:port")
 	host, _, err := net.SplitHostPort(localAddrStr)
 	if err != nil {
