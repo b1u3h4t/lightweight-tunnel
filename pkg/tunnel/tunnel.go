@@ -218,17 +218,23 @@ func (t *Tunnel) Stop() {
 	
 	// Close listener (server mode) - this will unblock Accept()
 	if t.listener != nil {
-		t.listener.Close()
+		if err := t.listener.Close(); err != nil {
+			log.Printf("Error closing listener: %v", err)
+		}
 	}
 	
 	// Close single connection (client mode) - this will unblock Read/Write
 	if t.conn != nil {
-		t.conn.Close()
+		if err := t.conn.Close(); err != nil {
+			log.Printf("Error closing connection: %v", err)
+		}
 	}
 	
 	// Close TUN device - this will unblock Read/Write operations
 	if t.tunFile != nil {
-		t.tunFile.Close()
+		if err := t.tunFile.Close(); err != nil {
+			log.Printf("Error closing TUN device: %v", err)
+		}
 	}
 	
 	// Close all client connections (server mode)
@@ -237,7 +243,9 @@ func (t *Tunnel) Stop() {
 		client.stopOnce.Do(func() {
 			close(client.stopCh)
 		})
-		client.conn.Close()
+		if err := client.conn.Close(); err != nil {
+			log.Printf("Error closing client connection: %v", err)
+		}
 	}
 	t.clientsMux.Unlock()
 	
