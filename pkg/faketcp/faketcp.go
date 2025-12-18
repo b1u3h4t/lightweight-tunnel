@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,13 @@ const (
 	MaxPacketSize = 1500
 	// Maximum payload size (MTU - IP - TCP headers)
 	MaxPayloadSize = MaxPacketSize - IPHeaderSize - TCPHeaderSize
+	
+	// Read timeout duration for making blocking reads interruptible
+	ReadTimeoutDuration = 1 * time.Second
+	// Listener read timeout for queue operations (longer timeout for actual data)
+	ListenerReadTimeout = 30 * time.Second
+	// Channel close delay to allow pending writes to complete
+	ChannelCloseDelay = 100 * time.Millisecond
 )
 
 // TCPHeader represents a minimal TCP header
@@ -69,6 +77,8 @@ type Conn struct {
 	mu          sync.Mutex
 	isConnected bool // true if UDP socket is connected, false if shared listener socket
 	recvQueue   chan []byte // for listener connections
+	closed      int32       // atomic flag: 1 if connection is closed, 0 otherwise
+	closeOnce   sync.Once   // ensures channel is closed only once
 }
 
 // NewConn creates a new fake TCP connection
@@ -144,8 +154,15 @@ func (l *Listener) Accept() (*Conn, error) {
 	buf := make([]byte, MaxPacketSize)
 	
 	for {
+		// Set read deadline to allow for interruption
+		l.udpConn.SetReadDeadline(time.Now().Add(ReadTimeoutDuration))
+		
 		n, remoteAddr, err := l.udpConn.ReadFromUDP(buf)
 		if err != nil {
+			// Check if it's a timeout, if so continue to allow for shutdown check
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
 			return nil, err
 		}
 		
@@ -192,11 +209,25 @@ func (l *Listener) Accept() (*Conn, error) {
 		if n > TCPHeaderSize {
 			payload := make([]byte, n-TCPHeaderSize)
 			copy(payload, buf[TCPHeaderSize:n])
-			select {
-			case conn.recvQueue <- payload:
-			default:
-				// Queue full, drop packet and log
-				log.Printf("WARNING: Receive queue full for %s, dropping packet (%d bytes)", connKey, len(payload))
+			
+			// Check if connection is closed before attempting to send (using atomic read)
+			if atomic.LoadInt32(&conn.closed) == 0 {
+				// Use recover to handle the rare case where channel is closed between check and send
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							// Channel was closed, silently drop packet
+							log.Printf("WARNING: Connection closed for %s, dropping packet (%d bytes)", connKey, len(payload))
+						}
+					}()
+					select {
+					case conn.recvQueue <- payload:
+						// Successfully queued
+					default:
+						// Queue full, drop packet and log
+						log.Printf("WARNING: Receive queue full for %s, dropping packet (%d bytes)", connKey, len(payload))
+					}
+				}()
 			}
 		}
 	}
@@ -252,19 +283,32 @@ func (c *Conn) WritePacket(data []byte) error {
 // ReadPacket receives data and strips fake TCP header
 func (c *Conn) ReadPacket() ([]byte, error) {
 	if !c.isConnected {
-		// Listener connection - read from queue
+		// Listener connection - read from queue with proper closed check
 		select {
-		case payload := <-c.recvQueue:
+		case payload, ok := <-c.recvQueue:
+			if !ok {
+				return nil, fmt.Errorf("connection closed")
+			}
 			return payload, nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(ListenerReadTimeout):
+			// Check if closed during timeout (using atomic read)
+			if atomic.LoadInt32(&c.closed) != 0 {
+				return nil, fmt.Errorf("connection closed")
+			}
 			return nil, fmt.Errorf("read timeout")
 		}
 	}
 	
-	// Connected socket - read directly
+	// Connected socket - read directly with deadline to allow interruption
+	c.udpConn.SetReadDeadline(time.Now().Add(ReadTimeoutDuration))
+	
 	buf := make([]byte, MaxPacketSize)
 	n, err := c.udpConn.Read(buf)
 	if err != nil {
+		// Check if it's a timeout - return a specific error to allow caller to retry
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, netErr
+		}
 		return nil, err
 	}
 	
@@ -345,11 +389,32 @@ func parseTCPHeader(buf []byte) *TCPHeader {
 	}
 }
 
-// calculateChecksum calculates TCP checksum (simplified version)
 // Close closes the connection
 func (c *Conn) Close() error {
-	// Note: We don't close udpConn if it's shared with a listener
-	// For connected sockets created with Dial(), closing is handled by the caller
+	// Use atomic compare-and-swap to prevent multiple close operations
+	// This ensures only ONE goroutine can proceed past this point
+	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
+		// Already closed - return immediately without creating a goroutine
+		return nil
+	}
+	
+	// For connected sockets created with Dial(), close the UDP connection
+	if c.isConnected {
+		return c.udpConn.Close()
+	}
+	
+	// For shared listener sockets, don't close the shared UDP connection
+	// but close the receive queue channel after a brief delay to allow pending writes to complete
+	if c.recvQueue != nil {
+		// Only ONE goroutine is created due to the atomic check above
+		// Give pending writes a chance to complete, then close channel exactly once
+		go func() {
+			time.Sleep(ChannelCloseDelay)
+			c.closeOnce.Do(func() {
+				close(c.recvQueue)
+			})
+		}()
+	}
 	return nil
 }
 
