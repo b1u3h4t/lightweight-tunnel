@@ -76,6 +76,7 @@ type Conn struct {
 	isConnected bool // true if UDP socket is connected, false if shared listener socket
 	recvQueue   chan []byte // for listener connections
 	closed      int32       // atomic flag: 1 if connection is closed, 0 otherwise
+	closeOnce   sync.Once   // ensures channel is closed only once
 }
 
 // NewConn creates a new fake TCP connection
@@ -392,12 +393,12 @@ func (c *Conn) Close() error {
 	// For shared listener sockets, don't close the shared UDP connection
 	// but close the receive queue channel after a brief delay to allow pending writes to complete
 	if c.recvQueue != nil {
-		// Give pending writes a chance to complete
+		// Give pending writes a chance to complete, then close channel exactly once
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			close(c.recvQueue)
+			c.closeOnce.Do(func() {
+				close(c.recvQueue)
+			})
 		}()
 	}
 	return nil
