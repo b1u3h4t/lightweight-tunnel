@@ -18,6 +18,7 @@ const (
 // TunDevice represents a TUN network device
 type TunDevice struct {
 	file *os.File
+	fd   int
 	name string
 }
 
@@ -49,8 +50,7 @@ func CreateTUN(name string) (*TunDevice, error) {
 		return nil, fmt.Errorf("failed to create TUN device: %v", errno)
 	}
 	
-	// Create os.File from file descriptor
-	// Since fd was opened in blocking mode, os.NewFile will not register it with the poller
+	// Create os.File from file descriptor for compatibility and automatic closing
 	file := os.NewFile(uintptr(fd), "/dev/net/tun")
 
 	// Get actual device name (may differ if name was in use)
@@ -65,18 +65,31 @@ func CreateTUN(name string) (*TunDevice, error) {
 
 	return &TunDevice{
 		file: file,
+		fd:   fd,
 		name: actualName,
 	}, nil
 }
 
 // Read reads a packet from the TUN device
 func (t *TunDevice) Read(buf []byte) (int, error) {
-	return t.file.Read(buf)
+	for {
+		n, err := syscall.Read(t.fd, buf)
+		if err == syscall.EINTR {
+			continue
+		}
+		return n, err
+	}
 }
 
 // Write writes a packet to the TUN device
 func (t *TunDevice) Write(buf []byte) (int, error) {
-	return t.file.Write(buf)
+	for {
+		n, err := syscall.Write(t.fd, buf)
+		if err == syscall.EINTR {
+			continue
+		}
+		return n, err
+	}
 }
 
 // Close closes the TUN device
