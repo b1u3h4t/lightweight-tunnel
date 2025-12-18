@@ -1319,20 +1319,21 @@ func (t *Tunnel) sendPublicAddrToClient(client *ClientConnection) {
 	fullPacket[0] = PacketTypePublicAddr
 	copy(fullPacket[1:], []byte(publicAddrStr))
 	
-	// Encrypt
+	// Encrypt the packet (don't rely on clientNetWriter since this is not a data packet)
 	encryptedPacket, err := t.encryptPacket(fullPacket)
 	if err != nil {
 		log.Printf("Failed to encrypt public address: %v", err)
 		return
 	}
 	
-	// Send to client via sendQueue
-	select {
-	case client.sendQueue <- encryptedPacket:
-		log.Printf("Sent public address %s to client", publicAddrStr)
-	default:
-		log.Printf("Failed to send public address to client: queue full")
+	// Send directly to network connection (bypass sendQueue which is for data packets)
+	// This avoids double-wrapping by clientNetWriter
+	if err := client.conn.WritePacket(encryptedPacket); err != nil {
+		log.Printf("Failed to send public address to client: %v", err)
+		return
 	}
+	
+	log.Printf("Sent public address %s to client", publicAddrStr)
 }
 
 // broadcastPeerInfo broadcasts peer information to all connected clients (server mode)
@@ -1357,11 +1358,12 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 	t.clientsMux.RLock()
 	for _, client := range t.clients {
 		if client.clientIP != nil && !client.clientIP.Equal(newClientIP) {
-			select {
-			case client.sendQueue <- encryptedPacket:
+			// Send directly to network connection (bypass sendQueue which is for data packets)
+			// This avoids double-wrapping by clientNetWriter
+			if err := client.conn.WritePacket(encryptedPacket); err != nil {
+				log.Printf("Failed to broadcast peer info to %s: %v", client.clientIP, err)
+			} else {
 				log.Printf("Broadcasted peer info of %s to client %s", newClientIP, client.clientIP)
-			default:
-				log.Printf("Failed to broadcast peer info to %s: queue full", client.clientIP)
 			}
 		}
 	}
