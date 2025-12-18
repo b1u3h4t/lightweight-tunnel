@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	PacketTypeData      = 0x01
-	PacketTypeKeepalive = 0x02
-	PacketTypePeerInfo  = 0x03 // Peer discovery/advertisement
-	PacketTypeRouteInfo = 0x04 // Route information exchange
+	PacketTypeData       = 0x01
+	PacketTypeKeepalive  = 0x02
+	PacketTypePeerInfo   = 0x03 // Peer discovery/advertisement
+	PacketTypeRouteInfo  = 0x04 // Route information exchange
+	PacketTypePublicAddr = 0x05 // Server tells client its public address
 
 	// IPv4 constants
 	IPv4Version      = 4
@@ -63,6 +64,8 @@ type Tunnel struct {
 	p2pManager    *p2p.Manager      // P2P connection manager
 	routingTable  *routing.RoutingTable // Routing table
 	myTunnelIP    net.IP            // My tunnel IP address
+	publicAddr    string            // Public address as seen by server (for NAT traversal)
+	publicAddrMux sync.RWMutex      // Protects publicAddr
 }
 
 // NewTunnel creates a new tunnel instance
@@ -180,10 +183,7 @@ func (t *Tunnel) Start() error {
 			
 			log.Printf("P2P enabled on port %d", t.p2pManager.GetLocalPort())
 			
-			// Announce our P2P info to the server
-			if err := t.announcePeerInfo(); err != nil {
-				log.Printf("Warning: Failed to announce P2P info: %v", err)
-			}
+			// Note: P2P info will be announced after receiving public address from server
 			
 			// Start route update goroutine
 			t.wg.Add(1)
@@ -453,6 +453,11 @@ func (t *Tunnel) handleClient(conn *faketcp.Conn) {
 		stopCh:    make(chan struct{}),
 	}
 
+	// Send client's public address for NAT traversal (if P2P enabled)
+	if t.config.P2PEnabled {
+		go t.sendPublicAddrToClient(client)
+	}
+
 	// Start client goroutines
 	client.wg.Add(3)
 	go t.clientNetReader(client)
@@ -660,6 +665,23 @@ func (t *Tunnel) netReader() {
 			}
 		case PacketTypeKeepalive:
 			// Keepalive received, no action needed
+		case PacketTypePublicAddr:
+			// Server sent us our public address
+			publicAddr := string(payload)
+			t.publicAddrMux.Lock()
+			t.publicAddr = publicAddr
+			t.publicAddrMux.Unlock()
+			log.Printf("Received public address from server: %s", publicAddr)
+			
+			// Now announce P2P info with the correct public address
+			if t.p2pManager != nil {
+				go t.announcePeerInfo()
+			}
+		case PacketTypePeerInfo:
+			// Received peer info from server about another client
+			if t.config.P2PEnabled && t.p2pManager != nil {
+				t.handlePeerInfoFromServer(payload)
+			}
 		}
 	}
 }
@@ -1026,6 +1048,46 @@ func (t *Tunnel) handlePeerInfoPacket(fromIP net.IP, data []byte) {
 	log.Printf("Received peer info: %s at %s", tunnelIP, peer.PublicAddr)
 }
 
+// handlePeerInfoFromServer handles peer info received from server (client mode)
+func (t *Tunnel) handlePeerInfoFromServer(data []byte) {
+	// Parse peer information from packet
+	// Format: TunnelIP|PublicAddr|LocalAddr
+	info := string(data)
+	parts := strings.Split(info, "|")
+	if len(parts) < 3 {
+		return
+	}
+	
+	tunnelIP := net.ParseIP(parts[0])
+	if tunnelIP == nil {
+		return
+	}
+	
+	// Don't add ourselves
+	if tunnelIP.Equal(t.myTunnelIP) {
+		return
+	}
+	
+	peer := p2p.NewPeerInfo(tunnelIP)
+	peer.PublicAddr = parts[1]
+	peer.LocalAddr = parts[2]
+	
+	// Add to P2P manager
+	if t.p2pManager != nil {
+		t.p2pManager.AddPeer(peer)
+		
+		// Try to establish P2P connection
+		go t.p2pManager.ConnectToPeer(tunnelIP)
+	}
+	
+	// Add to routing table
+	if t.routingTable != nil {
+		t.routingTable.AddPeer(peer)
+	}
+	
+	log.Printf("Received peer info from server: %s at %s (local: %s)", tunnelIP, peer.PublicAddr, peer.LocalAddr)
+}
+
 // handleRouteInfoPacket handles route information updates
 func (t *Tunnel) handleRouteInfoPacket(fromIP net.IP, data []byte) {
 	// This can be extended to exchange routing information
@@ -1178,25 +1240,44 @@ func (t *Tunnel) announcePeerInfo() error {
 	// Get local P2P port
 	p2pPort := t.p2pManager.GetLocalPort()
 	
-	// Get our local address - use LocalAddr() which returns net.Addr
+	// Get our public address (received from server)
+	t.publicAddrMux.RLock()
+	publicAddrStr := t.publicAddr
+	t.publicAddrMux.RUnlock()
+	
+	if publicAddrStr == "" {
+		// Public address not yet received from server, will try again later
+		return fmt.Errorf("public address not yet available")
+	}
+	
+	// Parse public address to extract IP
+	publicHost, _, err := net.SplitHostPort(publicAddrStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse public address: %v", err)
+	}
+	
+	// Build P2P address with P2P port using public IP
+	publicP2PAddr := fmt.Sprintf("%s:%d", publicHost, p2pPort)
+	
+	// Get local address for local network peers
 	localAddr := t.conn.LocalAddr()
 	if localAddr == nil {
 		return fmt.Errorf("connection has no local address")
 	}
 	localAddrStr := localAddr.String()
 	
-	// Parse to extract IP (format is "IP:port")
-	host, _, err := net.SplitHostPort(localAddrStr)
+	// Parse to extract local IP (format is "IP:port")
+	localHost, _, err := net.SplitHostPort(localAddrStr)
 	if err != nil {
 		return fmt.Errorf("failed to parse local address: %v", err)
 	}
 	
-	// Build P2P address with P2P port
-	p2pAddr := fmt.Sprintf("%s:%d", host, p2pPort)
+	// Build local P2P address
+	localP2PAddr := fmt.Sprintf("%s:%d", localHost, p2pPort)
 	
 	// Format: TunnelIP|PublicAddr|LocalAddr
-	// For now, use same address for both public and local (NAT traversal will be attempted)
-	peerInfo := fmt.Sprintf("%s|%s|%s", t.myTunnelIP.String(), p2pAddr, p2pAddr)
+	// Use public address for NAT traversal and local address for same-network peers
+	peerInfo := fmt.Sprintf("%s|%s|%s", t.myTunnelIP.String(), publicP2PAddr, localP2PAddr)
 	
 	// Create peer info packet
 	fullPacket := make([]byte, len(peerInfo)+1)
@@ -1214,8 +1295,40 @@ func (t *Tunnel) announcePeerInfo() error {
 		return fmt.Errorf("failed to send peer info: %v", err)
 	}
 	
-	log.Printf("Announced P2P info to server: %s at %s", t.myTunnelIP, p2pAddr)
+	log.Printf("Announced P2P info to server: %s at public=%s local=%s", t.myTunnelIP, publicP2PAddr, localP2PAddr)
 	return nil
+}
+
+// sendPublicAddrToClient sends the client's public address for NAT traversal (server mode)
+func (t *Tunnel) sendPublicAddrToClient(client *ClientConnection) {
+	// Get client's public address from connection
+	remoteAddr := client.conn.RemoteAddr()
+	if remoteAddr == nil {
+		log.Printf("Cannot send public address: client has no remote address")
+		return
+	}
+	
+	publicAddrStr := remoteAddr.String()
+	
+	// Create public address packet
+	fullPacket := make([]byte, len(publicAddrStr)+1)
+	fullPacket[0] = PacketTypePublicAddr
+	copy(fullPacket[1:], []byte(publicAddrStr))
+	
+	// Encrypt
+	encryptedPacket, err := t.encryptPacket(fullPacket)
+	if err != nil {
+		log.Printf("Failed to encrypt public address: %v", err)
+		return
+	}
+	
+	// Send to client via sendQueue
+	select {
+	case client.sendQueue <- encryptedPacket:
+		log.Printf("Sent public address %s to client", publicAddrStr)
+	default:
+		log.Printf("Failed to send public address to client: queue full")
+	}
 }
 
 // broadcastPeerInfo broadcasts peer information to all connected clients (server mode)
