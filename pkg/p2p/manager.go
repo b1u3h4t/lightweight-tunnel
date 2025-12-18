@@ -137,10 +137,10 @@ func (m *Manager) ConnectToPeer(peerTunnelIP net.IP) error {
 	// Try to parse peer's public address
 	remoteAddr, err := net.ResolveUDPAddr("udp4", peer.PublicAddr)
 	if err != nil {
-		return fmt.Errorf("failed to resolve peer address: %v", err)
+		return fmt.Errorf("failed to resolve peer public address: %v", err)
 	}
 	
-	// Create connection
+	// Create connection with public address
 	conn := &Connection{
 		RemoteAddr: remoteAddr,
 		PeerIP:     peerTunnelIP,
@@ -150,10 +150,28 @@ func (m *Manager) ConnectToPeer(peerTunnelIP net.IP) error {
 	
 	m.connections[ipStr] = conn
 	
-	// Send initial handshake packet for NAT traversal
+	// Send initial handshake packet for NAT traversal to public address
 	go m.performHandshake(conn)
 	
-	log.Printf("Attempting P2P connection to %s at %s", ipStr, peer.PublicAddr)
+	// Also try local address if different from public (for same-network peers)
+	if peer.LocalAddr != "" && peer.LocalAddr != peer.PublicAddr {
+		localAddr, err := net.ResolveUDPAddr("udp4", peer.LocalAddr)
+		if err == nil {
+			// Create a temporary connection object for local address handshake
+			localConn := &Connection{
+				RemoteAddr: localAddr,
+				PeerIP:     peerTunnelIP,
+				sendQueue:  make(chan []byte, 100),
+				stopCh:     make(chan struct{}),
+			}
+			go m.performHandshake(localConn)
+			log.Printf("Attempting P2P connection to %s at public=%s and local=%s", ipStr, peer.PublicAddr, peer.LocalAddr)
+		} else {
+			log.Printf("Attempting P2P connection to %s at %s", ipStr, peer.PublicAddr)
+		}
+	} else {
+		log.Printf("Attempting P2P connection to %s at %s", ipStr, peer.PublicAddr)
+	}
 	
 	return nil
 }
@@ -249,11 +267,16 @@ func (m *Manager) handleHandshake(remoteAddr *net.UDPAddr) {
 	// Find if this is from a known peer
 	peerIP := m.findPeerByAddr(remoteAddr)
 	if peerIP != nil {
-		// Mark peer as connected
 		m.mu.Lock()
+		// Update connection's remote address to the one that actually worked
+		if conn, exists := m.connections[peerIP.String()]; exists {
+			// Update to the address that successfully sent us a packet
+			conn.RemoteAddr = remoteAddr
+		}
+		// Mark peer as connected
 		if peer, exists := m.peers[peerIP.String()]; exists {
 			peer.SetConnected(true)
-			log.Printf("P2P connection established with %s", peerIP)
+			log.Printf("P2P connection established with %s via %s", peerIP, remoteAddr)
 		}
 		m.mu.Unlock()
 		
@@ -268,8 +291,10 @@ func (m *Manager) findPeerByAddr(addr *net.UDPAddr) net.IP {
 	defer m.mu.RUnlock()
 	
 	addrStr := addr.String()
+	
+	// Check both public and local addresses
 	for _, peer := range m.peers {
-		if peer.PublicAddr == addrStr {
+		if peer.PublicAddr == addrStr || peer.LocalAddr == addrStr {
 			return peer.TunnelIP
 		}
 	}
