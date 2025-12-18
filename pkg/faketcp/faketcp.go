@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,8 @@ const (
 	
 	// Read timeout duration for making blocking reads interruptible
 	ReadTimeoutDuration = 1 * time.Second
+	// Listener read timeout for queue operations (longer timeout for actual data)
+	ListenerReadTimeout = 30 * time.Second
 )
 
 // TCPHeader represents a minimal TCP header
@@ -72,7 +75,7 @@ type Conn struct {
 	mu          sync.Mutex
 	isConnected bool // true if UDP socket is connected, false if shared listener socket
 	recvQueue   chan []byte // for listener connections
-	closed      bool        // tracks if connection is closed
+	closed      int32       // atomic flag: 1 if connection is closed, 0 otherwise
 }
 
 // NewConn creates a new fake TCP connection
@@ -204,12 +207,8 @@ func (l *Listener) Accept() (*Conn, error) {
 			payload := make([]byte, n-TCPHeaderSize)
 			copy(payload, buf[TCPHeaderSize:n])
 			
-			// Check if connection is closed before attempting to send
-			conn.mu.Lock()
-			closed := conn.closed
-			conn.mu.Unlock()
-			
-			if !closed {
+			// Check if connection is closed before attempting to send (using atomic read)
+			if atomic.LoadInt32(&conn.closed) == 0 {
 				select {
 				case conn.recvQueue <- payload:
 				default:
@@ -278,12 +277,9 @@ func (c *Conn) ReadPacket() ([]byte, error) {
 				return nil, fmt.Errorf("connection closed")
 			}
 			return payload, nil
-		case <-time.After(30 * time.Second):
-			// Check if closed during timeout
-			c.mu.Lock()
-			closed := c.closed
-			c.mu.Unlock()
-			if closed {
+		case <-time.After(ListenerReadTimeout):
+			// Check if closed during timeout (using atomic read)
+			if atomic.LoadInt32(&c.closed) != 0 {
 				return nil, fmt.Errorf("connection closed")
 			}
 			return nil, fmt.Errorf("read timeout")
@@ -382,23 +378,27 @@ func parseTCPHeader(buf []byte) *TCPHeader {
 
 // Close closes the connection
 func (c *Conn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	
-	// Avoid double-close
-	if c.closed {
+	// Use atomic compare-and-swap to avoid double-close
+	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
+		// Already closed
 		return nil
 	}
-	c.closed = true
 	
 	// For connected sockets created with Dial(), close the UDP connection
 	if c.isConnected {
 		return c.udpConn.Close()
 	}
+	
 	// For shared listener sockets, don't close the shared UDP connection
-	// but close the receive queue channel
+	// but close the receive queue channel after a brief delay to allow pending writes to complete
 	if c.recvQueue != nil {
-		close(c.recvQueue)
+		// Give pending writes a chance to complete
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			close(c.recvQueue)
+		}()
 	}
 	return nil
 }
