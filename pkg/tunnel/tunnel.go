@@ -48,6 +48,7 @@ type Tunnel struct {
 	fec        *fec.FEC
 	cipher     *crypto.Cipher   // Encryption cipher (nil if no key)
 	conn       *faketcp.Conn    // Used in client mode
+	listener   *faketcp.Listener // Used in server mode
 	clients    map[string]*ClientConnection // Used in server mode (key: IP address)
 	clientsMux sync.RWMutex
 	tunName    string
@@ -207,11 +208,27 @@ func (t *Tunnel) Start() error {
 
 // Stop stops the tunnel
 func (t *Tunnel) Stop() {
+	// Signal all goroutines to stop
 	close(t.stopCh)
 	
 	// Stop P2P manager
 	if t.p2pManager != nil {
 		t.p2pManager.Stop()
+	}
+	
+	// Close listener (server mode) - this will unblock Accept()
+	if t.listener != nil {
+		t.listener.Close()
+	}
+	
+	// Close single connection (client mode) - this will unblock Read/Write
+	if t.conn != nil {
+		t.conn.Close()
+	}
+	
+	// Close TUN device - this will unblock Read/Write operations
+	if t.tunFile != nil {
+		t.tunFile.Close()
 	}
 	
 	// Close all client connections (server mode)
@@ -224,14 +241,7 @@ func (t *Tunnel) Stop() {
 	}
 	t.clientsMux.Unlock()
 	
-	// Close single connection (client mode)
-	if t.conn != nil {
-		t.conn.Close()
-	}
-	
-	if t.tunFile != nil {
-		t.tunFile.Close()
-	}
+	// Now wait for all goroutines to finish
 	t.wg.Wait()
 	log.Println("Tunnel stopped")
 }
@@ -342,6 +352,9 @@ func (t *Tunnel) startServer() error {
 	if err != nil {
 		return err
 	}
+	
+	// Store listener for later cleanup
+	t.listener = listener
 
 	// Start TUN reader for server mode
 	t.wg.Add(1)
@@ -364,7 +377,6 @@ func (t *Tunnel) startServer() error {
 // acceptClients accepts multiple client connections
 func (t *Tunnel) acceptClients(listener *faketcp.Listener) {
 	defer t.wg.Done()
-	defer listener.Close()
 
 	for {
 		select {
