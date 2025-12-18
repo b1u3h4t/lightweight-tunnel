@@ -144,8 +144,15 @@ func (l *Listener) Accept() (*Conn, error) {
 	buf := make([]byte, MaxPacketSize)
 	
 	for {
+		// Set read deadline to allow for interruption
+		l.udpConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		
 		n, remoteAddr, err := l.udpConn.ReadFromUDP(buf)
 		if err != nil {
+			// Check if it's a timeout, if so continue to allow for shutdown check
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
 			return nil, err
 		}
 		
@@ -261,10 +268,16 @@ func (c *Conn) ReadPacket() ([]byte, error) {
 		}
 	}
 	
-	// Connected socket - read directly
+	// Connected socket - read directly with deadline to allow interruption
+	c.udpConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	
 	buf := make([]byte, MaxPacketSize)
 	n, err := c.udpConn.Read(buf)
 	if err != nil {
+		// Check if it's a timeout - return a specific error to allow caller to retry
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, netErr
+		}
 		return nil, err
 	}
 	
@@ -345,11 +358,17 @@ func parseTCPHeader(buf []byte) *TCPHeader {
 	}
 }
 
-// calculateChecksum calculates TCP checksum (simplified version)
 // Close closes the connection
 func (c *Conn) Close() error {
-	// Note: We don't close udpConn if it's shared with a listener
-	// For connected sockets created with Dial(), closing is handled by the caller
+	// For connected sockets created with Dial(), close the UDP connection
+	if c.isConnected {
+		return c.udpConn.Close()
+	}
+	// For shared listener sockets, don't close the shared UDP connection
+	// but close the receive queue channel
+	if c.recvQueue != nil {
+		close(c.recvQueue)
+	}
 	return nil
 }
 

@@ -570,6 +570,10 @@ func (t *Tunnel) netReader() {
 
 		packet, err := t.conn.ReadPacket()
 		if err != nil {
+			// Check if it's a timeout - if so, continue to allow checking stopCh
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
 			select {
 			case <-t.stopCh:
 				// Tunnel is stopping, no need to log
@@ -696,6 +700,10 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 
 		packet, err := client.conn.ReadPacket()
 		if err != nil {
+			// Check if it's a timeout - if so, continue to allow checking stopCh
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
 			select {
 			case <-t.stopCh:
 				// Tunnel is stopping, no need to log
