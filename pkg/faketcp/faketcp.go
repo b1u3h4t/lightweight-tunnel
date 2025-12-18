@@ -32,6 +32,8 @@ const (
 	ReadTimeoutDuration = 1 * time.Second
 	// Listener read timeout for queue operations (longer timeout for actual data)
 	ListenerReadTimeout = 30 * time.Second
+	// Channel close delay to allow pending writes to complete
+	ChannelCloseDelay = 100 * time.Millisecond
 )
 
 // TCPHeader represents a minimal TCP header
@@ -379,9 +381,10 @@ func parseTCPHeader(buf []byte) *TCPHeader {
 
 // Close closes the connection
 func (c *Conn) Close() error {
-	// Use atomic compare-and-swap to avoid double-close
+	// Use atomic compare-and-swap to prevent multiple close operations
+	// This ensures only ONE goroutine can proceed past this point
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
-		// Already closed
+		// Already closed - return immediately without creating a goroutine
 		return nil
 	}
 	
@@ -393,9 +396,10 @@ func (c *Conn) Close() error {
 	// For shared listener sockets, don't close the shared UDP connection
 	// but close the receive queue channel after a brief delay to allow pending writes to complete
 	if c.recvQueue != nil {
+		// Only ONE goroutine is created due to the atomic check above
 		// Give pending writes a chance to complete, then close channel exactly once
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(ChannelCloseDelay)
 			c.closeOnce.Do(func() {
 				close(c.recvQueue)
 			})
