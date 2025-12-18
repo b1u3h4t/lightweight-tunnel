@@ -126,7 +126,13 @@ func (m *Manager) ConnectToPeer(peerTunnelIP net.IP) error {
 	
 	// Check if already connected
 	if _, exists := m.connections[ipStr]; exists {
-		return nil
+		// Check if peer is actually marked as connected
+		if m.isPeerConnected(ipStr) {
+			log.Printf("Already connected to peer %s", ipStr)
+			return nil
+		}
+		// Reuse existing connection for retry
+		log.Printf("Retrying P2P connection to %s", ipStr)
 	}
 	
 	peer, exists := m.peers[ipStr]
@@ -140,15 +146,20 @@ func (m *Manager) ConnectToPeer(peerTunnelIP net.IP) error {
 		return fmt.Errorf("failed to resolve peer public address: %v", err)
 	}
 	
-	// Create connection with public address
-	conn := &Connection{
-		RemoteAddr: remoteAddr,
-		PeerIP:     peerTunnelIP,
-		sendQueue:  make(chan []byte, 100),
-		stopCh:     make(chan struct{}),
+	// Create or update connection with public address
+	conn, connExists := m.connections[ipStr]
+	if !connExists {
+		conn = &Connection{
+			RemoteAddr: remoteAddr,
+			PeerIP:     peerTunnelIP,
+			sendQueue:  make(chan []byte, 100),
+			stopCh:     make(chan struct{}),
+		}
+		m.connections[ipStr] = conn
+	} else {
+		// Update remote address for retry
+		conn.RemoteAddr = remoteAddr
 	}
-	
-	m.connections[ipStr] = conn
 	
 	// Send initial handshake packet for NAT traversal to public address
 	go m.performHandshake(conn)
@@ -330,11 +341,30 @@ func (m *Manager) GetLocalPort() int {
 	return m.localPort
 }
 
+// isPeerConnected checks if a peer is actually connected (handshake complete)
+// Must be called with m.mu held (read or write lock)
+func (m *Manager) isPeerConnected(ipStr string) bool {
+	if peer, exists := m.peers[ipStr]; exists {
+		peer.mu.RLock()
+		connected := peer.Connected
+		peer.mu.RUnlock()
+		return connected
+	}
+	return false
+}
+
 // IsConnected checks if we have a P2P connection to a peer
 func (m *Manager) IsConnected(peerIP net.IP) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
-	_, exists := m.connections[peerIP.String()]
-	return exists
+	ipStr := peerIP.String()
+	
+	// Check if connection exists
+	if _, exists := m.connections[ipStr]; !exists {
+		return false
+	}
+	
+	// Check if peer is marked as connected (handshake complete)
+	return m.isPeerConnected(ipStr)
 }
