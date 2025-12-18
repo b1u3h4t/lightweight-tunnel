@@ -398,12 +398,13 @@ func (m *Manager) findPeerByAddr(addr *net.UDPAddr) net.IP {
 	
 	// Also check connections
 	for ipStr, conn := range m.connections {
+		// Skip nil connections
+		if conn == nil || conn.RemoteAddr == nil {
+			continue
+		}
+		// Exact match on remote address (IP:port)
 		if conn.RemoteAddr.String() == addrStr {
 			return conn.PeerIP
-		}
-		// Parse IP from string
-		if ip := net.ParseIP(ipStr); ip != nil {
-			return ip
 		}
 	}
 	

@@ -24,6 +24,7 @@ const (
 	PacketTypePeerInfo   = 0x03 // Peer discovery/advertisement
 	PacketTypeRouteInfo  = 0x04 // Route information exchange
 	PacketTypePublicAddr = 0x05 // Server tells client its public address
+    PacketTypePunch      = 0x06 // Server requests simultaneous hole-punch
 
 	// IPv4 constants
 	IPv4Version      = 4
@@ -46,6 +47,9 @@ type ClientConnection struct {
 	stopCh     chan struct{}
 	stopOnce   sync.Once
 	wg         sync.WaitGroup
+	// lastPeerInfo stores the last peer info string sent by this client
+	lastPeerInfo string
+	mu            sync.RWMutex
 }
 
 // Tunnel represents a lightweight tunnel
@@ -399,11 +403,6 @@ func (t *Tunnel) connectClient() error {
 	
 	timeout := time.Duration(t.config.Timeout) * time.Second
 	
-	// TLS is not supported with UDP-based fake TCP
-	if t.config.TLSEnabled {
-		return fmt.Errorf("TLS is not supported with UDP-based fake TCP tunnel. For encryption, use IPsec, WireGuard, or application-level encryption")
-	}
-	
 	log.Println("Using UDP with fake TCP headers for firewall bypass")
 	conn, err := faketcp.Dial(t.config.RemoteAddr, timeout)
 	if err != nil {
@@ -418,11 +417,6 @@ func (t *Tunnel) connectClient() error {
 // startServer starts the server and accepts multiple clients
 func (t *Tunnel) startServer() error {
 	log.Printf("Listening on %s...", t.config.LocalAddr)
-	
-	// TLS is not supported with UDP-based fake TCP
-	if t.config.TLSEnabled {
-		return fmt.Errorf("TLS is not supported with UDP-based fake TCP tunnel. For encryption, use IPsec, WireGuard, or application-level encryption")
-	}
 	
 	log.Println("Using UDP with fake TCP headers for firewall bypass")
 	listener, err := faketcp.Listen(t.config.LocalAddr)
@@ -753,6 +747,11 @@ func (t *Tunnel) netReader() {
 			if t.config.P2PEnabled && t.p2pManager != nil {
 				t.handlePeerInfoFromServer(payload)
 			}
+		case PacketTypePunch:
+			// Server requests immediate simultaneous hole-punching
+			if t.config.P2PEnabled && t.p2pManager != nil {
+				t.handlePunchFromServer(payload)
+			}
 		}
 	}
 }
@@ -954,6 +953,10 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 						}
 						
 						// Broadcast this peer info to all other clients
+						// Save peerInfo on the client for later punch coordination (protected)
+						client.mu.Lock()
+						client.lastPeerInfo = peerInfoStr
+						client.mu.Unlock()
 						t.broadcastPeerInfo(tunnelIP, peerInfoStr)
 					}
 				}
@@ -1177,6 +1180,44 @@ func (t *Tunnel) handlePeerInfoFromServer(data []byte) {
 	}
 	
 	log.Printf("Received peer info from server: %s at %s (local: %s)", tunnelIP, peer.PublicAddr, peer.LocalAddr)
+}
+
+// handlePunchFromServer handles a server-initiated punch control packet
+func (t *Tunnel) handlePunchFromServer(data []byte) {
+	// Parse peer information from packet
+	// Format: TunnelIP|PublicAddr|LocalAddr
+	info := string(data)
+	parts := strings.Split(info, "|")
+	if len(parts) < 3 {
+		return
+	}
+
+	tunnelIP := net.ParseIP(parts[0])
+	if tunnelIP == nil {
+		return
+	}
+
+	// Don't add ourselves
+	if tunnelIP.Equal(t.myTunnelIP) {
+		return
+	}
+
+	peer := p2p.NewPeerInfo(tunnelIP)
+	peer.PublicAddr = parts[1]
+	peer.LocalAddr = parts[2]
+
+	// Add to routing table first
+	if t.routingTable != nil {
+		t.routingTable.AddPeer(peer)
+	}
+
+	// Then add to P2P manager and immediately attempt connection (no delay)
+	if t.p2pManager != nil {
+		t.p2pManager.AddPeer(peer)
+		go t.p2pManager.ConnectToPeer(tunnelIP)
+	}
+
+	log.Printf("Received PUNCH from server for %s at %s (local: %s)", tunnelIP, peer.PublicAddr, peer.LocalAddr)
 }
 
 // handlePeerDisconnect handles notification that a peer has disconnected
@@ -1460,21 +1501,55 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 		return
 	}
 	
-	// Broadcast to all clients except the sender
+	// Broadcast to all clients except the sender and also send a PUNCH control to prompt simultaneous hole-punching
 	t.clientsMux.RLock()
 	defer t.clientsMux.RUnlock()
 	for _, client := range t.clients {
 		if client.clientIP != nil && !client.clientIP.Equal(newClientIP) {
-			// Send directly to network connection (bypass sendQueue which is for data packets)
-			// This avoids double-wrapping by clientNetWriter
+			// Send peer info to existing client
 			if err := client.conn.WritePacket(encryptedPacket); err != nil {
 				log.Printf("Failed to broadcast peer info to %s: %v", client.clientIP, err)
-				// Signal this specific client to disconnect on write error
-				client.stopOnce.Do(func() {
-					close(client.stopCh)
-				})
+				client.stopOnce.Do(func() { close(client.stopCh) })
 			} else {
 				log.Printf("Broadcasted peer info of %s to client %s", newClientIP, client.clientIP)
+			}
+
+			// Send PUNCH control to existing client so it will attempt punching to new client immediately
+			punchPacket := make([]byte, len(peerInfo)+1)
+			punchPacket[0] = PacketTypePunch
+			copy(punchPacket[1:], []byte(peerInfo))
+			encryptedPunch, err := t.encryptPacket(punchPacket)
+			if err == nil {
+				if err := client.conn.WritePacket(encryptedPunch); err != nil {
+					log.Printf("Failed to send PUNCH to %s: %v", client.clientIP, err)
+				} else {
+					log.Printf("Sent PUNCH for %s to client %s", newClientIP, client.clientIP)
+				}
+			} else {
+				log.Printf("Failed to encrypt PUNCH packet: %v", err)
+			}
+            
+			// Also send existing client's peerInfo as a PUNCH to the new client so new client will punch back
+			client.mu.RLock()
+			clientInfo := client.lastPeerInfo
+			client.mu.RUnlock()
+			if clientInfo != "" {
+				punchBack := make([]byte, len(clientInfo)+1)
+				punchBack[0] = PacketTypePunch
+				copy(punchBack[1:], []byte(clientInfo))
+				encryptedPunchBack, err := t.encryptPacket(punchBack)
+				if err == nil {
+					// Need to send to the new client's connection; find it by IP
+					if newClient := t.getClientByIP(newClientIP); newClient != nil {
+						if err := newClient.conn.WritePacket(encryptedPunchBack); err != nil {
+							log.Printf("Failed to send PUNCH back to new client %s: %v", newClientIP, err)
+						} else {
+							log.Printf("Sent PUNCH (existing %s) to new client %s", client.clientIP, newClientIP)
+						}
+					}
+				} else {
+					log.Printf("Failed to encrypt PUNCH back packet: %v", err)
+				}
 			}
 		}
 	}

@@ -79,28 +79,21 @@ func (rt *RoutingTable) updateRouteForPeer(peer *p2p.PeerInfo) {
 		}
 		return
 	}
-	
-	// Check for relay routes through other peers
-	bestRelayRoute := rt.findBestRelayRoute(peer)
-	
-	// Check server route quality
+
+	// Relay routing is not implemented yet. Avoid selecting relay routes
+	// as if they were available. Always choose server route as the
+	// fallback when direct P2P is not connected.
 	serverQuality := peer.GetQualityScore()
 	if peer.ThroughServer {
 		serverQuality -= ServerRoutePenalty // Penalty for server routing
 	}
-	
-	// Choose best route
-	if bestRelayRoute != nil && bestRelayRoute.Quality > serverQuality {
-		rt.routes[ipStr] = bestRelayRoute
-	} else {
-		rt.routes[ipStr] = &Route{
-			Destination: peer.TunnelIP,
-			Type:        RouteServer,
-			NextHop:     nil, // Server doesn't have a next hop
-			Hops:        1,
-			Quality:     serverQuality,
-			LastUpdated: time.Now(),
-		}
+	rt.routes[ipStr] = &Route{
+		Destination: peer.TunnelIP,
+		Type:        RouteServer,
+		NextHop:     nil, // Server doesn't have a next hop
+		Hops:        1,
+		Quality:     serverQuality,
+		LastUpdated: time.Now(),
 	}
 }
 

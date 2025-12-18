@@ -38,10 +38,7 @@ func main() {
 	routeUpdateInterval := flag.Int("route-update", 30, "Route quality check interval in seconds")
 	showVersion := flag.Bool("v", false, "Show version")
 	generateConfig := flag.String("g", "", "Generate example config file")
-	tlsEnabled := flag.Bool("tls", false, "Enable TLS encryption")
-	tlsCertFile := flag.String("tls-cert", "", "TLS certificate file (server mode)")
-	tlsKeyFile := flag.String("tls-key", "", "TLS private key file (server mode)")
-	tlsSkipVerify := flag.Bool("tls-skip-verify", false, "Skip TLS certificate verification (client mode, insecure)")
+	// TLS flags removed: TLS over the UDP fake-TCP transport is not supported.
 	key := flag.String("k", "", "Encryption key for tunnel traffic (required for secure communication)")
 
 	flag.Parse()
@@ -85,10 +82,7 @@ func main() {
 			SendQueueSize:       *sendQueueSize,
 			RecvQueueSize:       *recvQueueSize,
 			Key:                 *key,
-			TLSEnabled:          *tlsEnabled,
-			TLSCertFile:         *tlsCertFile,
-			TLSKeyFile:          *tlsKeyFile,
-			TLSSkipVerify:       *tlsSkipVerify,
+			// TLS configuration is available via config file only; CLI flags were removed
 			MultiClient:         *multiClient,
 			MaxClients:          *maxClients,
 			ClientIsolation:     *clientIsolation,
@@ -174,13 +168,6 @@ func validateConfig(cfg *config.Config) error {
 
 	if cfg.FECDataShards < 1 || cfg.FECParityShards < 1 {
 		return fmt.Errorf("FEC shards must be positive")
-	}
-
-	// TLS validation
-	if cfg.TLSEnabled && cfg.Mode == "server" {
-		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
-			return fmt.Errorf("TLS enabled in server mode but certificate or key file not specified")
-		}
 	}
 
 	return nil
