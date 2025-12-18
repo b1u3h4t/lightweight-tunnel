@@ -1166,13 +1166,20 @@ func (t *Tunnel) announcePeerInfo() error {
 	// Get local P2P port
 	p2pPort := t.p2pManager.GetLocalPort()
 	
-	// Get our external address from the connection
-	localAddr := t.conn.LocalAddr().(*net.UDPAddr)
-	publicAddr := fmt.Sprintf("%s:%d", localAddr.IP.String(), p2pPort)
-	localP2PAddr := fmt.Sprintf("%s:%d", localAddr.IP.String(), p2pPort)
+	// Get our local address - use LocalAddr() which returns net.Addr
+	localAddrStr := t.conn.LocalAddr().String()
+	// Parse to extract IP (format is "IP:port")
+	host, _, err := net.SplitHostPort(localAddrStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse local address: %v", err)
+	}
+	
+	// Build P2P address with P2P port
+	p2pAddr := fmt.Sprintf("%s:%d", host, p2pPort)
 	
 	// Format: TunnelIP|PublicAddr|LocalAddr
-	peerInfo := fmt.Sprintf("%s|%s|%s", t.myTunnelIP.String(), publicAddr, localP2PAddr)
+	// For now, use same address for both public and local (NAT traversal will be attempted)
+	peerInfo := fmt.Sprintf("%s|%s|%s", t.myTunnelIP.String(), p2pAddr, p2pAddr)
 	
 	// Create peer info packet
 	fullPacket := make([]byte, len(peerInfo)+1)
@@ -1190,7 +1197,7 @@ func (t *Tunnel) announcePeerInfo() error {
 		return fmt.Errorf("failed to send peer info: %v", err)
 	}
 	
-	log.Printf("Announced P2P info to server: %s at %s", t.myTunnelIP, publicAddr)
+	log.Printf("Announced P2P info to server: %s at %s", t.myTunnelIP, p2pAddr)
 	return nil
 }
 

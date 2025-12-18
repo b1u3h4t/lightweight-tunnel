@@ -30,8 +30,8 @@ type ifreq struct {
 
 // CreateTUN creates a new TUN device
 func CreateTUN(name string) (*TunDevice, error) {
-	// Open TUN device with non-blocking flag
-	file, err := os.OpenFile("/dev/net/tun", os.O_RDWR|syscall.O_NONBLOCK, 0)
+	// Open TUN device
+	file, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open /dev/net/tun: %v", err)
 	}
