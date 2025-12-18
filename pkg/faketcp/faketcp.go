@@ -212,12 +212,22 @@ func (l *Listener) Accept() (*Conn, error) {
 			
 			// Check if connection is closed before attempting to send (using atomic read)
 			if atomic.LoadInt32(&conn.closed) == 0 {
-				select {
-				case conn.recvQueue <- payload:
-				default:
-					// Queue full, drop packet and log
-					log.Printf("WARNING: Receive queue full for %s, dropping packet (%d bytes)", connKey, len(payload))
-				}
+				// Use recover to handle the rare case where channel is closed between check and send
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							// Channel was closed, silently drop packet
+							log.Printf("WARNING: Connection closed for %s, dropping packet (%d bytes)", connKey, len(payload))
+						}
+					}()
+					select {
+					case conn.recvQueue <- payload:
+						// Successfully queued
+					default:
+						// Queue full, drop packet and log
+						log.Printf("WARNING: Receive queue full for %s, dropping packet (%d bytes)", connKey, len(payload))
+					}
+				}()
 			}
 		}
 	}
