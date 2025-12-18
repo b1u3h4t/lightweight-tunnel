@@ -48,11 +48,9 @@ func CreateTUN(name string) (*TunDevice, error) {
 		return nil, fmt.Errorf("failed to create TUN device: %v", errno)
 	}
 	
-	// Set file descriptor to non-blocking mode to make it pollable
-	if err := syscall.SetNonblock(int(file.Fd()), true); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to set non-blocking mode: %v", err)
-	}
+	// Keep file descriptor in BLOCKING mode for proper Read/Write operations
+	// Non-blocking mode would require proper epoll/select handling which is not implemented
+	// Blocking mode works correctly with goroutines and allows clean shutdown via Close()
 
 	// Get actual device name (may differ if name was in use)
 	actualName := string(ifr.Name[:])

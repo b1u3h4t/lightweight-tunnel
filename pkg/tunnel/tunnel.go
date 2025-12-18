@@ -675,7 +675,21 @@ func (t *Tunnel) netReader() {
 			
 			// Now announce P2P info with the correct public address
 			if t.p2pManager != nil {
-				go t.announcePeerInfo()
+				// Retry announcement with exponential backoff if it fails
+				go func() {
+					retries := 0
+					maxRetries := 5
+					for retries < maxRetries {
+						if err := t.announcePeerInfo(); err != nil {
+							log.Printf("Failed to announce P2P info (attempt %d/%d): %v", retries+1, maxRetries, err)
+							retries++
+							time.Sleep(time.Duration(1<<uint(retries)) * time.Second) // Exponential backoff
+						} else {
+							log.Printf("Successfully announced P2P info")
+							break
+						}
+					}
+				}()
 			}
 		case PacketTypePeerInfo:
 			// Received peer info from server about another client
@@ -1032,22 +1046,23 @@ func (t *Tunnel) handlePeerInfoPacket(fromIP net.IP, data []byte) {
 	peer.PublicAddr = parts[1]
 	peer.LocalAddr = parts[2]
 	
-	// Add to P2P manager first
-	if t.p2pManager != nil {
-		t.p2pManager.AddPeer(peer)
-	}
-	
-	// Add to routing table
+	// Add to routing table FIRST before P2P manager
 	if t.routingTable != nil {
 		t.routingTable.AddPeer(peer)
 	}
 	
-	// Try to establish P2P connection (after peer is added)
+	// Then add to P2P manager
 	if t.p2pManager != nil {
-		go t.p2pManager.ConnectToPeer(tunnelIP)
+		t.p2pManager.AddPeer(peer)
+		// Try to establish P2P connection in a separate goroutine
+		// Small delay to ensure peer is fully registered
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			t.p2pManager.ConnectToPeer(tunnelIP)
+		}()
 	}
 	
-	log.Printf("Received peer info: %s at %s", tunnelIP, peer.PublicAddr)
+	log.Printf("Received peer info: %s at %s (local: %s)", tunnelIP, peer.PublicAddr, peer.LocalAddr)
 }
 
 // handlePeerInfoFromServer handles peer info received from server (client mode)
@@ -1074,19 +1089,20 @@ func (t *Tunnel) handlePeerInfoFromServer(data []byte) {
 	peer.PublicAddr = parts[1]
 	peer.LocalAddr = parts[2]
 	
-	// Add to P2P manager first
-	if t.p2pManager != nil {
-		t.p2pManager.AddPeer(peer)
-	}
-	
-	// Add to routing table
+	// Add to routing table FIRST before P2P manager
 	if t.routingTable != nil {
 		t.routingTable.AddPeer(peer)
 	}
 	
-	// Try to establish P2P connection (after peer is added)
+	// Then add to P2P manager
 	if t.p2pManager != nil {
-		go t.p2pManager.ConnectToPeer(tunnelIP)
+		t.p2pManager.AddPeer(peer)
+		// Try to establish P2P connection in a separate goroutine
+		// Small delay to ensure peer is fully registered
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			t.p2pManager.ConnectToPeer(tunnelIP)
+		}()
 	}
 	
 	log.Printf("Received peer info from server: %s at %s (local: %s)", tunnelIP, peer.PublicAddr, peer.LocalAddr)
