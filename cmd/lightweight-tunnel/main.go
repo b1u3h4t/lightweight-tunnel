@@ -42,6 +42,7 @@ func main() {
 	tlsCertFile := flag.String("tls-cert", "", "TLS certificate file (server mode)")
 	tlsKeyFile := flag.String("tls-key", "", "TLS private key file (server mode)")
 	tlsSkipVerify := flag.Bool("tls-skip-verify", false, "Skip TLS certificate verification (client mode, insecure)")
+	key := flag.String("k", "", "Encryption key for tunnel traffic (required for secure communication)")
 
 	flag.Parse()
 
@@ -83,6 +84,7 @@ func main() {
 			KeepaliveInterval:   10,
 			SendQueueSize:       *sendQueueSize,
 			RecvQueueSize:       *recvQueueSize,
+			Key:                 *key,
 			TLSEnabled:          *tlsEnabled,
 			TLSCertFile:         *tlsCertFile,
 			TLSKeyFile:          *tlsKeyFile,
@@ -121,11 +123,17 @@ func main() {
 		log.Printf("Multi-client: %v (max: %d)", cfg.MultiClient, cfg.MaxClients)
 		log.Printf("Client Isolation: %v", cfg.ClientIsolation)
 	}
+	if cfg.Key != "" {
+		log.Println("🔐 Encryption: Enabled (AES-256-GCM)")
+	} else {
+		log.Println("⚠️  WARNING: No encryption key set (-k) - traffic is NOT encrypted")
+		log.Println("⚠️  Anyone can connect to this tunnel without authentication")
+		log.Println("⚠️  Use -k <key> to enable encryption and prevent unauthorized access")
+	}
 	log.Printf("TLS Encryption: %v", cfg.TLSEnabled)
-	if !cfg.TLSEnabled {
-		log.Println("⚠️  WARNING: TLS disabled - traffic will be sent in PLAINTEXT")
+	if !cfg.TLSEnabled && cfg.Key == "" {
+		log.Println("⚠️  WARNING: Both TLS and key encryption are disabled")
 		log.Println("⚠️  ISPs and network operators can view and log all tunnel content")
-		log.Println("⚠️  Enable TLS with -tls flag for secure communication")
 	}
 
 	// Create tunnel

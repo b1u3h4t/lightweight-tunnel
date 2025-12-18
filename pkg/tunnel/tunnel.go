@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/openbmx/lightweight-tunnel/internal/config"
+	"github.com/openbmx/lightweight-tunnel/pkg/crypto"
 	"github.com/openbmx/lightweight-tunnel/pkg/fec"
 	"github.com/openbmx/lightweight-tunnel/pkg/faketcp"
 	"github.com/openbmx/lightweight-tunnel/pkg/p2p"
@@ -45,6 +46,7 @@ type ClientConnection struct {
 type Tunnel struct {
 	config     *config.Config
 	fec        *fec.FEC
+	cipher     *crypto.Cipher   // Encryption cipher (nil if no key)
 	conn       *faketcp.Conn    // Used in client mode
 	clients    map[string]*ClientConnection // Used in server mode (key: IP address)
 	clientsMux sync.RWMutex
@@ -74,10 +76,21 @@ func NewTunnel(cfg *config.Config) (*Tunnel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse tunnel address: %v", err)
 	}
+	
+	// Create encryption cipher if key is provided
+	var cipher *crypto.Cipher
+	if cfg.Key != "" {
+		cipher, err = crypto.NewCipher(cfg.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create encryption cipher: %v", err)
+		}
+		log.Println("Encryption enabled with AES-256-GCM")
+	}
 
 	t := &Tunnel{
 		config:     cfg,
 		fec:        fecCodec,
+		cipher:     cipher,
 		stopCh:     make(chan struct{}),
 		myTunnelIP: myIP,
 	}
@@ -570,9 +583,20 @@ func (t *Tunnel) netReader() {
 			continue
 		}
 
+		// Decrypt if cipher is available
+		decryptedPacket, err := t.decryptPacket(packet)
+		if err != nil {
+			log.Printf("Decryption error (wrong key?): %v", err)
+			continue
+		}
+
+		if len(decryptedPacket) < 1 {
+			continue
+		}
+
 		// Check packet type
-		packetType := packet[0]
-		payload := packet[1:]
+		packetType := decryptedPacket[0]
+		payload := decryptedPacket[1:]
 
 		switch packetType {
 		case PacketTypeData:
@@ -604,7 +628,14 @@ func (t *Tunnel) netWriter() {
 			fullPacket[0] = PacketTypeData
 			copy(fullPacket[1:], packet)
 
-			if err := t.conn.WritePacket(fullPacket); err != nil {
+			// Encrypt if cipher is available
+			encryptedPacket, err := t.encryptPacket(fullPacket)
+			if err != nil {
+				log.Printf("Encryption error: %v", err)
+				continue
+			}
+
+			if err := t.conn.WritePacket(encryptedPacket); err != nil {
 				select {
 				case <-t.stopCh:
 					// Tunnel is stopping, no need to log
@@ -631,7 +662,13 @@ func (t *Tunnel) keepalive() {
 		case <-t.stopCh:
 			return
 		case <-ticker.C:
-			if err := t.conn.WritePacket(keepalivePacket); err != nil {
+			// Encrypt if cipher is available
+			encryptedPacket, err := t.encryptPacket(keepalivePacket)
+			if err != nil {
+				log.Printf("Keepalive encryption error: %v", err)
+				continue
+			}
+			if err := t.conn.WritePacket(encryptedPacket); err != nil {
 				select {
 				case <-t.stopCh:
 					// Tunnel is stopping, no need to log
@@ -677,9 +714,20 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 			continue
 		}
 
+		// Decrypt if cipher is available
+		decryptedPacket, err := t.decryptPacket(packet)
+		if err != nil {
+			log.Printf("Client decryption error from %s (wrong key?): %v", client.conn.RemoteAddr(), err)
+			continue
+		}
+
+		if len(decryptedPacket) < 1 {
+			continue
+		}
+
 		// Check packet type
-		packetType := packet[0]
-		payload := packet[1:]
+		packetType := decryptedPacket[0]
+		payload := decryptedPacket[1:]
 
 		switch packetType {
 		case PacketTypeData:
@@ -762,7 +810,14 @@ func (t *Tunnel) clientNetWriter(client *ClientConnection) {
 			fullPacket[0] = PacketTypeData
 			copy(fullPacket[1:], packet)
 
-			if err := client.conn.WritePacket(fullPacket); err != nil {
+			// Encrypt if cipher is available
+			encryptedPacket, err := t.encryptPacket(fullPacket)
+			if err != nil {
+				log.Printf("Client encryption error: %v", err)
+				continue
+			}
+
+			if err := client.conn.WritePacket(encryptedPacket); err != nil {
 				select {
 				case <-t.stopCh:
 					// Tunnel is stopping, no need to log
@@ -796,7 +851,13 @@ func (t *Tunnel) clientKeepalive(client *ClientConnection) {
 		case <-client.stopCh:
 			return
 		case <-ticker.C:
-			if err := client.conn.WritePacket(keepalivePacket); err != nil {
+			// Encrypt if cipher is available
+			encryptedPacket, err := t.encryptPacket(keepalivePacket)
+			if err != nil {
+				log.Printf("Client keepalive encryption error: %v", err)
+				continue
+			}
+			if err := client.conn.WritePacket(encryptedPacket); err != nil {
 				select {
 				case <-t.stopCh:
 					// Tunnel is stopping, no need to log
@@ -821,9 +882,20 @@ func (t *Tunnel) handleP2PPacket(peerIP net.IP, data []byte) {
 		return
 	}
 	
+	// Decrypt if cipher is available
+	decryptedData, err := t.decryptPacket(data)
+	if err != nil {
+		log.Printf("P2P decryption error from %s (wrong key?): %v", peerIP, err)
+		return
+	}
+	
+	if len(decryptedData) < 1 {
+		return
+	}
+	
 	// Check packet type
-	packetType := data[0]
-	payload := data[1:]
+	packetType := decryptedData[0]
+	payload := decryptedData[1:]
 	
 	switch packetType {
 	case PacketTypeData:
@@ -939,7 +1011,14 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) error {
 					fullPacket[0] = PacketTypeData
 					copy(fullPacket[1:], packet)
 					
-					if err := t.p2pManager.SendPacket(dstIP, fullPacket); err != nil {
+					// Encrypt the packet before sending via P2P
+					encryptedPacket, err := t.encryptPacket(fullPacket)
+					if err != nil {
+						log.Printf("P2P encryption error: %v", err)
+						return t.sendViaServer(packet)
+					}
+					
+					if err := t.p2pManager.SendPacket(dstIP, encryptedPacket); err != nil {
 						log.Printf("P2P send failed to %s, falling back to server: %v", dstIP, err)
 						// Fall back to server
 						return t.sendViaServer(packet)
@@ -997,4 +1076,20 @@ func GetPeerIP(tunnelAddr string) (string, error) {
 	}
 
 	return fmt.Sprintf("%s/%s", ip4.String(), parts[1]), nil
+}
+
+// encryptPacket encrypts a packet if cipher is available
+func (t *Tunnel) encryptPacket(data []byte) ([]byte, error) {
+	if t.cipher == nil {
+		return data, nil
+	}
+	return t.cipher.Encrypt(data)
+}
+
+// decryptPacket decrypts a packet if cipher is available
+func (t *Tunnel) decryptPacket(data []byte) ([]byte, error) {
+	if t.cipher == nil {
+		return data, nil
+	}
+	return t.cipher.Decrypt(data)
 }

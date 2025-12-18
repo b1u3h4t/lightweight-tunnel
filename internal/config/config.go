@@ -18,6 +18,7 @@ type Config struct {
 	KeepaliveInterval int `json:"keepalive"`    // Keepalive interval in seconds
 	SendQueueSize int    `json:"send_queue_size"` // Size of send queue buffer (default 1000)
 	RecvQueueSize int    `json:"recv_queue_size"` // Size of receive queue buffer (default 1000)
+	Key           string `json:"key"`            // Encryption key for tunnel traffic (required for secure communication)
 	TLSEnabled    bool   `json:"tls_enabled"`    // Enable TLS encryption
 	TLSCertFile   string `json:"tls_cert_file"`  // Path to TLS certificate file (server mode)
 	TLSKeyFile    string `json:"tls_key_file"`   // Path to TLS private key file (server mode)
