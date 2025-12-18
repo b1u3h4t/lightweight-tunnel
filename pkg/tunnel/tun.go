@@ -47,6 +47,12 @@ func CreateTUN(name string) (*TunDevice, error) {
 		file.Close()
 		return nil, fmt.Errorf("failed to create TUN device: %v", errno)
 	}
+	
+	// Set file descriptor to non-blocking mode to make it pollable
+	if err := syscall.SetNonblock(int(file.Fd()), true); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to set non-blocking mode: %v", err)
+	}
 
 	// Get actual device name (may differ if name was in use)
 	actualName := string(ifr.Name[:])

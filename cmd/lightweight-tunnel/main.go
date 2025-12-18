@@ -187,22 +187,24 @@ func validateConfig(cfg *config.Config) error {
 }
 
 func generateConfigFile(filename string) error {
-	// Generate server config
+	// Generate server config with all features
 	serverCfg := config.DefaultConfig()
 	serverCfg.Mode = "server"
 	serverCfg.LocalAddr = "0.0.0.0:9000"
 	serverCfg.TunnelAddr = "10.0.0.1/24"
+	serverCfg.Key = "CHANGE-THIS-TO-YOUR-SECRET-KEY"  // Example key
 
 	if err := config.SaveConfig(filename, serverCfg); err != nil {
 		return err
 	}
 
-	// Generate client config example
+	// Generate client config example with all features
 	clientFilename := filename + ".client"
 	clientCfg := config.DefaultConfig()
 	clientCfg.Mode = "client"
 	clientCfg.RemoteAddr = "SERVER_IP:9000"
 	clientCfg.TunnelAddr = "10.0.0.2/24"
+	clientCfg.Key = "CHANGE-THIS-TO-YOUR-SECRET-KEY"  // Must match server key
 
 	if err := config.SaveConfig(clientFilename, clientCfg); err != nil {
 		return err
