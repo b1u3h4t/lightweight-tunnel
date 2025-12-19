@@ -2392,7 +2392,26 @@ func (t *Tunnel) rotateCipher(newKey string) error {
 	if oldCipher != nil {
 		go t.expirePrevCipher(oldCipher)
 	}
+
+	t.persistKeyToConfigFile(newKey)
 	return nil
+}
+
+func (t *Tunnel) persistKeyToConfigFile(newKey string) {
+	t.configMux.RLock()
+	path := t.config.ConfigPath
+	t.configMux.RUnlock()
+
+	if path == "" {
+		return
+	}
+
+	if err := config.UpdateConfigKey(path, newKey); err != nil {
+		log.Printf("Failed to update config file %s with new key: %v", path, err)
+		return
+	}
+
+	log.Printf("Updated config file %s with rotated key", path)
 }
 
 func (t *Tunnel) expirePrevCipher(prev *crypto.Cipher) {

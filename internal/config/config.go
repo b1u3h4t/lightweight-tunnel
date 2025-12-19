@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -35,6 +36,9 @@ type Config struct {
 	RouteUpdateInterval int  `json:"route_update_interval"` // Route quality check interval in seconds (default 30)
 	P2PTimeout          int  `json:"p2p_timeout"`           // P2P connection timeout in seconds (default 5)
 	EnableNATDetection  bool `json:"enable_nat_detection"`  // Enable automatic NAT type detection (default true)
+
+	// ConfigPath stores the source config file path (not persisted to JSON)
+	ConfigPath string `json:"-"`
 }
 
 // DefaultConfig returns a default configuration
@@ -140,6 +144,7 @@ func LoadConfig(filename string) (*Config, error) {
 		config.EnableNATDetection = true
 	}
 
+	config.ConfigPath = filename
 	return &config, nil
 }
 
@@ -176,4 +181,30 @@ func SaveConfig(filename string, config *Config) error {
 	}
 
 	return os.WriteFile(filename, data, 0644)
+}
+
+// UpdateConfigKey updates only the key field in an existing config file while preserving other fields.
+func UpdateConfigKey(filename string, newKey string) error {
+	if newKey == "" {
+		return fmt.Errorf("new key is empty")
+	}
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	var cfgMap map[string]interface{}
+	if err := json.Unmarshal(data, &cfgMap); err != nil {
+		return err
+	}
+
+	cfgMap["key"] = newKey
+
+	updated, err := json.MarshalIndent(cfgMap, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filename, updated, 0644)
 }
