@@ -225,6 +225,20 @@ make build
 # 编译后的二进制文件位于：bin/lightweight-tunnel
 ```
 
+#### 方式 3：注册为 systemd 服务（可自定义服务名与配置路径）
+
+```bash
+# 先构建
+make build
+
+# 安装为 systemd 服务，指定配置文件路径与服务名
+sudo make install-service CONFIG_PATH=/etc/lightweight-tunnel/config-server.json SERVICE_NAME=lightweight-tunnel-server
+
+# 启动与查看状态
+sudo systemctl start lightweight-tunnel-server
+sudo systemctl status lightweight-tunnel-server
+```
+
 ---
 
 ## 📖 使用说明

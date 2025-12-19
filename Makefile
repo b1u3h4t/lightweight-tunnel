@@ -3,6 +3,10 @@
 # Binary name
 BINARY_NAME=lightweight-tunnel
 OUTPUT_DIR=bin
+SERVICE_NAME?=$(BINARY_NAME)
+CONFIG_PATH?=/etc/lightweight-tunnel/config.json
+INSTALL_BIN_DIR=/usr/local/bin
+SYSTEMD_UNIT=/etc/systemd/system/$(SERVICE_NAME).service
 
 # Build variables
 GOBASE=$(shell pwd)
@@ -44,6 +48,37 @@ install:
 test:
 	@echo "Running tests..."
 	$(GOTEST) -v ./...
+
+## install-service: Install systemd service (CONFIG_PATH=/path/to/config.json SERVICE_NAME=name)
+install-service: build
+	@if [ -z "$(CONFIG_PATH)" ]; then \
+		echo "ERROR: CONFIG_PATH is required. Example: make install-service CONFIG_PATH=/etc/lightweight-tunnel/config.json"; \
+		exit 1; \
+	fi
+	@echo "Installing binary to $(INSTALL_BIN_DIR)..."
+	@sudo install -m 755 $(GOBIN)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME)
+	@echo "Creating systemd unit $(SYSTEMD_UNIT)..."
+	@sudo tee $(SYSTEMD_UNIT) > /dev/null <<-'EOF'
+	[Unit]
+	Description=Lightweight Tunnel Service ($(SERVICE_NAME))
+	After=network-online.target
+	Wants=network-online.target
+
+	[Service]
+	Type=simple
+	ExecStart=$(INSTALL_BIN_DIR)/$(BINARY_NAME) -c $(CONFIG_PATH)
+	Restart=on-failure
+	RestartSec=5s
+	User=root
+	AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+	CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable $(SERVICE_NAME)
+	@echo "Service installed. Start it with: sudo systemctl start $(SERVICE_NAME)"
 
 ## run-server: Run as server (requires root)
 run-server: build
