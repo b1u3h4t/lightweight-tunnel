@@ -72,11 +72,11 @@ install-service:
 	fi; \
 	if [ -x "$(GOBIN)/$(BINARY_NAME)" ]; then \
 		echo "Using existing binary at $(GOBIN)/$(BINARY_NAME)"; \
-	elif command -v $(GOCMD) >/dev/null 2>&1; then \
+	elif command -v "$(GOCMD)" >/dev/null 2>&1; then \
 		echo "Binary not found, building $(BINARY_NAME)..."; \
 		$(MAKE) build; \
 	else \
-		echo "ERROR: $(GOBIN)/$(BINARY_NAME) not found and '$(GOCMD)' is not available. Please install Go or provide the prebuilt binary."; \
+		echo "ERROR: $(GOBIN)/$(BINARY_NAME) not found and $(GOCMD) is not available. Please install Go or provide the prebuilt binary."; \
 		exit 1; \
 	fi; \
 	sudo -n true >/dev/null 2>&1 || { \
