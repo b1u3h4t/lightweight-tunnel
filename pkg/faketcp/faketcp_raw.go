@@ -150,7 +150,6 @@ func (c *ConnRaw) performHandshake(timeout time.Duration) error {
 	
 	for retry := 0; retry < maxRetries; retry++ {
 		if retry > 0 {
-			log.Printf("Retrying handshake (attempt %d/%d)...", retry+1, maxRetries)
 			time.Sleep(retryInterval)
 		}
 		
@@ -158,7 +157,6 @@ func (c *ConnRaw) performHandshake(timeout time.Duration) error {
 		err := c.rawSocket.SendPacket(c.localIP, c.localPort, c.remoteIP, c.remotePort,
 			c.seqNum, 0, SYN, tcpOptions, nil)
 		if err != nil {
-			log.Printf("Failed to send SYN: %v", err)
 			continue
 		}
 
@@ -186,7 +184,6 @@ func (c *ConnRaw) performHandshake(timeout time.Duration) error {
 					if err != nil {
 						return fmt.Errorf("failed to send ACK: %v", err)
 					}
-					log.Printf("Handshake completed successfully")
 					return nil
 				}
 			case <-time.After(200 * time.Millisecond):
@@ -568,8 +565,8 @@ func (l *ListenerRaw) acceptLoop() {
 		l.mu.Lock()
 		conn, exists := l.connMap[connKey]
 		
+		// 1. 处理新连接的SYN
 		if !exists && (flags&SYN != 0) && (flags&ACK == 0) {
-			// New connection with pure SYN (not SYN-ACK)
 			isn, _ := randomUint32()
 			
 			newConn := &ConnRaw{
@@ -586,7 +583,7 @@ func (l *ListenerRaw) acceptLoop() {
 				recvQueue:   make(chan []byte, 100),
 				iptablesMgr: l.iptablesMgr,
 				stopCh:      make(chan struct{}),
-				isListener:  true, // 标记为listener接受的连接
+				isListener:  true,
 			}
 
 			// Send SYN-ACK
@@ -595,43 +592,61 @@ func (l *ListenerRaw) acceptLoop() {
 				newConn.seqNum, newConn.ackNum, SYN|ACK, tcpOptions, nil)
 			if err != nil {
 				l.mu.Unlock()
-				log.Printf("Failed to send SYN-ACK: %v", err)
 				continue
 			}
 			
 			newConn.seqNum++ // SYN consumes sequence number
-
-			// 添加到连接映射，但不放入acceptQueue（等待ACK）
 			l.connMap[connKey] = newConn
-			log.Printf("Sent SYN-ACK to %s, waiting for ACK", connKey)
 			l.mu.Unlock()
 			continue
 		}
 		
-		// 处理ACK包（完成三次握手）
+		// 2. 处理握手的ACK（第三次握手）
 		if exists && !conn.isConnected && (flags&ACK != 0) && (flags&SYN == 0) {
-			// 收到ACK，握手完成
 			conn.isConnected = true
+			conn.mu.Lock()
+			conn.ackNum = seq + uint32(len(payload))
+			conn.mu.Unlock()
 			l.mu.Unlock()
 			
-			log.Printf("Handshake completed for %s, accepting connection", connKey)
-			// 将连接放入acceptQueue
-			select {
-			case l.acceptQueue <- conn:
-			case <-time.After(1 * time.Second):
-				// Accept queue满了，移除连接
-				l.mu.Lock()
-				delete(l.connMap, connKey)
-				l.mu.Unlock()
-				log.Printf("Accept queue full, dropped connection %s", connKey)
+			// 放入acceptQueue（非阻塞方式）
+			go func(c *ConnRaw) {
+				select {
+				case l.acceptQueue <- c:
+				case <-time.After(2 * time.Second):
+					l.mu.Lock()
+					delete(l.connMap, connKey)
+					l.mu.Unlock()
+				}
+			}(conn)
+			
+			// 如果ACK带了数据，也要处理
+			if len(payload) > 0 {
+				tcpHdr := &TCPHeader{
+					SrcPort:    srcPort,
+					DstPort:    dstPort,
+					SeqNum:     seq,
+					AckNum:     ack,
+					DataOffset: 5,
+					Flags:      flags,
+					Window:     65535,
+				}
+				headerBytes := serializeTCPHeaderStatic(tcpHdr)
+				fullData := make([]byte, len(headerBytes)+len(payload))
+				copy(fullData, headerBytes)
+				copy(fullData[len(headerBytes):], payload)
+				
+				select {
+				case conn.recvQueue <- fullData:
+				default:
+				}
 			}
 			continue
 		}
 		
+		// 3. 处理已连接的数据包
 		if exists && conn.isConnected {
-			// 已连接的连接 - 处理数据包
 			if len(payload) > 0 || (flags&(FIN|RST) != 0) {
-				// Build packet with TCP header
 				tcpHdr := &TCPHeader{
 					SrcPort:    srcPort,
 					DstPort:    dstPort,
@@ -652,10 +667,14 @@ func (l *ListenerRaw) acceptLoop() {
 				select {
 				case conn.recvQueue <- fullData:
 				default:
-					log.Printf("WARNING: Receive queue full for %s", connKey)
+					// 队列满，丢弃
 				}
 			}
+			l.mu.Unlock()
+			continue
 		}
+		
+		// 其他情况：未知连接或无效状态的包，直接忽略
 		l.mu.Unlock()
 	}
 }
