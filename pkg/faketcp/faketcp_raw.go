@@ -71,11 +71,14 @@ func NewConnRaw(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort ui
 		recvQueue:   make(chan []byte, 100),
 		iptablesMgr: iptablesMgr,
 		stopCh:      make(chan struct{}),
+		isListener:  false,
 	}
 
-	// Start receive goroutine
-	conn.wg.Add(1)
-	go conn.recvLoop()
+	// 只有客户端连接才启动recvLoop，服务端连接由acceptLoop统一分发
+	if isClient {
+		conn.wg.Add(1)
+		go conn.recvLoop()
+	}
 
 	return conn, nil
 }
@@ -194,9 +197,14 @@ func (c *ConnRaw) performHandshake(timeout time.Duration) error {
 	return fmt.Errorf("handshake timeout after %d retries", maxRetries)
 }
 
-// recvLoop continuously receives packets from raw socket
+// recvLoop continuously receives packets from raw socket (只用于客户端连接)
 func (c *ConnRaw) recvLoop() {
 	defer c.wg.Done()
+
+	// 如果是listener接受的连接，不应该运行recvLoop
+	if c.isListener {
+		return
+	}
 
 	buf := make([]byte, 65535)
 	for {
@@ -559,8 +567,8 @@ func (l *ListenerRaw) acceptLoop() {
 		l.mu.Lock()
 		conn, exists := l.connMap[connKey]
 		
-		if !exists && (flags&SYN != 0) {
-			// New connection with SYN
+		if !exists && (flags&SYN != 0) && (flags&ACK == 0) {
+			// New connection with pure SYN (not SYN-ACK)
 			isn, _ := randomUint32()
 			
 			newConn := &ConnRaw{
@@ -577,32 +585,50 @@ func (l *ListenerRaw) acceptLoop() {
 				recvQueue:   make(chan []byte, 100),
 				iptablesMgr: l.iptablesMgr,
 				stopCh:      make(chan struct{}),
+				isListener:  true, // 标记为listener接受的连接
 			}
 
 			// Send SYN-ACK
 			tcpOptions := newConn.buildTCPOptions()
-			l.rawSocket.SendPacket(dstIP, dstPort, srcIP, srcPort,
+			err := l.rawSocket.SendPacket(dstIP, dstPort, srcIP, srcPort,
 				newConn.seqNum, newConn.ackNum, SYN|ACK, tcpOptions, nil)
+			if err != nil {
+				l.mu.Unlock()
+				log.Printf("Failed to send SYN-ACK: %v", err)
+				continue
+			}
 			
 			newConn.seqNum++ // SYN consumes sequence number
 
+			// 添加到连接映射，但不放入acceptQueue（等待ACK）
 			l.connMap[connKey] = newConn
+			log.Printf("Sent SYN-ACK to %s, waiting for ACK", connKey)
 			l.mu.Unlock()
-
-			// Wait for ACK (simplified - just accept the connection)
+			continue
+		}
+		
+		// 处理ACK包（完成三次握手）
+		if exists && !conn.isConnected && (flags&ACK != 0) && (flags&SYN == 0) {
+			// 收到ACK，握手完成
+			conn.isConnected = true
+			l.mu.Unlock()
+			
+			log.Printf("Handshake completed for %s, accepting connection", connKey)
+			// 将连接放入acceptQueue
 			select {
-			case l.acceptQueue <- newConn:
-			case <-time.After(HandshakeTimeout):
-				// Timeout, remove connection
+			case l.acceptQueue <- conn:
+			case <-time.After(1 * time.Second):
+				// Accept queue满了，移除连接
 				l.mu.Lock()
 				delete(l.connMap, connKey)
 				l.mu.Unlock()
+				log.Printf("Accept queue full, dropped connection %s", connKey)
 			}
 			continue
 		}
 		
-		if exists {
-			// Existing connection - queue payload
+		if exists && conn.isConnected {
+			// 已连接的连接 - 处理数据包
 			if len(payload) > 0 || (flags&(FIN|RST) != 0) {
 				// Build packet with TCP header
 				tcpHdr := &TCPHeader{
