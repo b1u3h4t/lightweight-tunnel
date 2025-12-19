@@ -348,6 +348,8 @@ sudo ./lightweight-tunnel \
 - `tunnel_addr`: 虚拟网络 IP 地址
 - `key`: 加密密钥（**必须设置且双方一致**）
 - `mtu`: 最大传输单元（0 = 自动检测）
+- `tun_name`: 可选，指定 TUN 设备名称（冲突或非法时自动回退）
+- `routes`: 可选，宣告给服务端/对端的 CIDR 路由列表
 
 #### 客户端配置示例
 
@@ -358,7 +360,12 @@ sudo ./lightweight-tunnel \
   "remote_addr": "服务器IP:9000",
   "tunnel_addr": "10.0.0.2/24",
   "key": "请修改为您的强密钥",
-  "mtu": 0
+  "mtu": 0,
+  "tun_name": "tun1",
+  "routes": [
+    "10.10.0.0/16",
+    "10.20.0.0/16"
+  ]
 }
 ```
 
