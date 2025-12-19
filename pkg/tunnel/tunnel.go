@@ -574,7 +574,7 @@ func (t *Tunnel) acceptClients(listener faketcp.ListenerAdapter) {
 }
 
 // handleClient handles a single client connection
-func (t *Tunnel) handleClient(conn *faketcp.Conn) {
+func (t *Tunnel) handleClient(conn faketcp.ConnAdapter) {
 	log.Printf("Client connected: %s", conn.RemoteAddr())
 
 	client := &ClientConnection{
