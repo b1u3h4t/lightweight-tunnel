@@ -246,8 +246,9 @@ func (c *ConnRaw) recvLoop() {
 			c.mu.Unlock()
 		}
 
-		// 只处理有payload的数据包，忽略纯ACK等控制包
-		if len(payload) == 0 {
+		// 只在已连接状态下过滤payload=0的包
+		// 握手期间（!isConnected）需要处理SYN-ACK等控制包
+		if c.isConnected && len(payload) == 0 {
 			continue
 		}
 
