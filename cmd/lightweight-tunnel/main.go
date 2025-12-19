@@ -96,7 +96,9 @@ func main() {
 	}
 
 	// Normalize client tunnel address when running without explicit config file
-	normalizeTunnelAddr(cfg, *configFile != "")
+	if err := normalizeTunnelAddr(cfg, *configFile != ""); err != nil {
+		log.Fatalf("Failed to normalize tunnel address: %v", err)
+	}
 
 	// Validate configuration
 	if err := validateConfig(cfg); err != nil {
@@ -207,18 +209,19 @@ func generateConfigFile(filename string) error {
 // normalizeTunnelAddr ensures the client does not reuse the default server tunnel IP
 // when no explicit configuration file is provided. This prevents IP conflicts like
 // both ends using 10.0.0.1/24, which makes the server tunnel unreachable.
-func normalizeTunnelAddr(cfg *config.Config, configFromFile bool) {
+func normalizeTunnelAddr(cfg *config.Config, configFromFile bool) error {
 	if configFromFile || cfg == nil || cfg.Mode != "client" {
-		return
+		return nil
 	}
 
 	const defaultServerTunnel = "10.0.0.1/24"
 	if cfg.TunnelAddr == defaultServerTunnel {
-		if peerAddr, err := tunnel.GetPeerIP(cfg.TunnelAddr); err == nil {
-			log.Printf("Client tunnel address %s conflicts with server default; auto-switching to %s", cfg.TunnelAddr, peerAddr)
-			cfg.TunnelAddr = peerAddr
-		} else {
-			log.Printf("Failed to derive peer tunnel IP: %v", err)
+		peerAddr, err := tunnel.GetPeerIP(cfg.TunnelAddr)
+		if err != nil {
+			return fmt.Errorf("derive peer tunnel IP: %w", err)
 		}
+		log.Printf("Client tunnel address %s conflicts with server default; auto-switching to %s", cfg.TunnelAddr, peerAddr)
+		cfg.TunnelAddr = peerAddr
 	}
+	return nil
 }
