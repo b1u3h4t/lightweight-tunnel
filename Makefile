@@ -52,7 +52,7 @@ test:
 	$(GOTEST) -v ./...
 
 ## install-service: Install systemd service (CONFIG_PATH=/path/to/config.json SERVICE_NAME=name)
-install-service: build
+install-service:
 	@set -e; \
 	if [ -z "$(CONFIG_PATH)" ]; then \
 		echo "ERROR: CONFIG_PATH is required. Example: make install-service CONFIG_PATH=/etc/lightweight-tunnel/config.json"; \
@@ -66,8 +66,17 @@ install-service: build
 		echo "ERROR: CONFIG_PATH must not contain whitespace."; \
 		exit 1; \
 	fi; \
-	if printf "%s" "$(CONFIG_PATH)" | grep -Eq '[;|&`$<>]'; then \
-		echo "ERROR: CONFIG_PATH contains unsupported characters ( ; | & ` $ < > )."; \
+	if printf "%s" "$(CONFIG_PATH)" | grep -Eq "[;|&\\\`\\$$<>]"; then \
+		echo "ERROR: CONFIG_PATH contains unsupported characters ( ; | & \` $ < > )."; \
+		exit 1; \
+	fi; \
+	if [ -x "$(GOBIN)/$(BINARY_NAME)" ]; then \
+		echo "Using existing binary at $(GOBIN)/$(BINARY_NAME)"; \
+	elif command -v "$(GOCMD)" >/dev/null 2>&1; then \
+		echo "Binary not found, building $(BINARY_NAME)..."; \
+		$(MAKE) build; \
+	else \
+		echo "ERROR: $(GOBIN)/$(BINARY_NAME) not found and $(GOCMD) is not available. Please install Go or provide the prebuilt binary."; \
 		exit 1; \
 	fi; \
 	sudo -n true >/dev/null 2>&1 || { \
@@ -98,30 +107,30 @@ install-service: build
 	echo "Installing binary to $(INSTALL_BIN_DIR)..."; \
 	sudo install -m 755 $(GOBIN)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME); \
 	echo "Creating systemd unit $(SYSTEMD_UNIT)..."; \
-	cat <<-'EOF' | sudo tee $(SYSTEMD_UNIT) > /dev/null
-	[Unit]
-	Description=Lightweight Tunnel Service ($(SERVICE_NAME))
-	After=network-online.target
-	Wants=network-online.target
-
-	[Service]
-	Type=simple
-	ExecStart=$(INSTALL_BIN_DIR)/$(BINARY_NAME) -c $(CONFIG_PATH)
-	Restart=on-failure
-	RestartSec=5s
-	User=$(SERVICE_USER)
-	Group=$(SERVICE_GROUP)
-	AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-	CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-	NoNewPrivileges=yes
-	# PrivateNetwork disabled because the tunnel requires host network access
-	PrivateNetwork=no
-	PrivateTmp=yes
-	ProtectHome=yes
-
-	[Install]
-	WantedBy=multi-user.target
-	EOF
+	{ \
+		echo "[Unit]"; \
+		echo "Description=Lightweight Tunnel Service ($(SERVICE_NAME))"; \
+		echo "After=network-online.target"; \
+		echo "Wants=network-online.target"; \
+		echo ""; \
+		echo "[Service]"; \
+		echo "Type=simple"; \
+		echo "ExecStart=$(INSTALL_BIN_DIR)/$(BINARY_NAME) -c $(CONFIG_PATH)"; \
+		echo "Restart=on-failure"; \
+		echo "RestartSec=5s"; \
+		echo "User=$(SERVICE_USER)"; \
+		echo "Group=$(SERVICE_GROUP)"; \
+		echo "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW"; \
+		echo "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW"; \
+		echo "NoNewPrivileges=yes"; \
+		echo "# PrivateNetwork disabled because the tunnel requires host network access"; \
+		echo "PrivateNetwork=no"; \
+		echo "PrivateTmp=yes"; \
+		echo "ProtectHome=yes"; \
+		echo ""; \
+		echo "[Install]"; \
+		echo "WantedBy=multi-user.target"; \
+	} | sudo tee $(SYSTEMD_UNIT) > /dev/null; \
 	sudo systemctl daemon-reload; \
 	sudo systemctl enable $(SERVICE_NAME); \
 	echo "Service installed. Start it with: sudo systemctl start $(SERVICE_NAME)"
