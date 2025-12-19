@@ -246,6 +246,11 @@ func (c *ConnRaw) recvLoop() {
 			c.mu.Unlock()
 		}
 
+		// 只处理有payload的数据包，忽略纯ACK等控制包
+		if len(payload) == 0 {
+			continue
+		}
+
 		// Build packet data including TCP header for compatibility
 		// Format: TCP header + payload
 		tcpHdr := &TCPHeader{
@@ -261,9 +266,7 @@ func (c *ConnRaw) recvLoop() {
 		headerBytes := serializeTCPHeaderStatic(tcpHdr)
 		fullData := make([]byte, len(headerBytes)+len(payload))
 		copy(fullData, headerBytes)
-		if len(payload) > 0 {
-			copy(fullData[len(headerBytes):], payload)
-		}
+		copy(fullData[len(headerBytes):], payload)
 
 		// Queue received data
 		if atomic.LoadInt32(&c.closed) == 0 {
@@ -271,7 +274,6 @@ func (c *ConnRaw) recvLoop() {
 			case c.recvQueue <- fullData:
 			default:
 				// Queue full, drop packet
-				log.Printf("WARNING: Receive queue full, dropping packet")
 			}
 		}
 	}
@@ -650,9 +652,10 @@ func (l *ListenerRaw) acceptLoop() {
 			continue
 		}
 		
-		// 3. 处理已连接的数据包
+		// 3. 处理已连接的数据包（只处理有payload的包）
 		if exists && conn.isConnected {
-			if len(payload) > 0 || (flags&(FIN|RST) != 0) {
+			// 只处理有实际数据的包，忽略纯ACK、keepalive等控制包
+			if len(payload) > 0 {
 				tcpHdr := &TCPHeader{
 					SrcPort:    srcPort,
 					DstPort:    dstPort,
@@ -666,9 +669,7 @@ func (l *ListenerRaw) acceptLoop() {
 				headerBytes := serializeTCPHeaderStatic(tcpHdr)
 				fullData := make([]byte, len(headerBytes)+len(payload))
 				copy(fullData, headerBytes)
-				if len(payload) > 0 {
-					copy(fullData[len(headerBytes):], payload)
-				}
+				copy(fullData[len(headerBytes):], payload)
 
 				select {
 				case conn.recvQueue <- fullData:
@@ -676,6 +677,7 @@ func (l *ListenerRaw) acceptLoop() {
 					// 队列满，丢弃
 				}
 			}
+			// FIN/RST包不需要放入queue，连接关闭会由其他机制处理
 			l.mu.Unlock()
 			continue
 		}
