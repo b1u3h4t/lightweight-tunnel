@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 const (
