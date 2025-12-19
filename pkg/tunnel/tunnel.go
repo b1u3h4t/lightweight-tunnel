@@ -1003,7 +1003,9 @@ func (t *Tunnel) netWriter() {
 					if err2 := t.conn.WritePacket(encryptedPacket); err2 != nil {
 						log.Printf("Network write retry failed: %v, packet will be lost", err2)
 						// Don't return - continue processing queue
-						// The packet is lost but we keep the tunnel alive
+						// Accept packet loss to maintain tunnel connectivity for subsequent packets.
+						// This is better than exiting the goroutine, which would prevent any future
+						// packets from being sent even after the connection is restored.
 					}
 				}
 			}
