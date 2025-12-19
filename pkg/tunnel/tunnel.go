@@ -417,10 +417,14 @@ func (t *Tunnel) configureTUN() error {
 func (t *Tunnel) connectClient() error {
 	log.Printf("Connecting to server at %s...", t.config.RemoteAddr)
 
-	timeout := time.Duration(t.config.Timeout) * time.Second
+	// Use a short handshake timeout for the fake-TCP Dial so the initial
+	// three-way handshake does not add a full application-level RTT to the
+	// first data packet. The overall connection timeout (used elsewhere)
+	// remains `t.config.Timeout`.
+	handshakeTimeout := 500 * time.Millisecond
 
 	log.Println("Using UDP with fake TCP headers for firewall bypass")
-	conn, err := faketcp.Dial(t.config.RemoteAddr, timeout)
+	conn, err := faketcp.Dial(t.config.RemoteAddr, handshakeTimeout)
 	if err != nil {
 		return err
 	}
