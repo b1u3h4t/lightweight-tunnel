@@ -66,8 +66,8 @@ install-service:
 		echo "ERROR: CONFIG_PATH must not contain whitespace."; \
 		exit 1; \
 	fi; \
-	if printf "%s" "$(CONFIG_PATH)" | grep -Eq '[;|&`$<>]'; then \
-		echo "ERROR: CONFIG_PATH contains unsupported characters ( ; | & ` $ < > )."; \
+	if printf "%s" "$(CONFIG_PATH)" | grep -Eq "[;|&\\\`\\$$<>]"; then \
+		echo "ERROR: CONFIG_PATH contains unsupported characters ( ; | & \` $ < > )."; \
 		exit 1; \
 	fi; \
 	if [ -x "$(GOBIN)/$(BINARY_NAME)" ]; then \
