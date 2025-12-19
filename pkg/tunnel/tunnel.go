@@ -40,10 +40,11 @@ const (
 	IPv4MinHeaderLen = 20
 
 	// P2P timing constants
-	P2PRegistrationDelay = 100 * time.Millisecond // Delay to ensure peer registration completes
-	P2PHandshakeWaitTime = 2 * time.Second        // Time to wait for P2P handshake to complete before updating routes
-	P2PMaxRetries        = 5
-	P2PMaxBackoffSeconds = 32 // Maximum backoff delay in seconds
+	P2PRegistrationDelay           = 100 * time.Millisecond // Delay to ensure peer registration completes
+	P2PHandshakeWaitTime           = 2 * time.Second        // Time to wait for P2P handshake to complete before updating routes
+	P2PReconnectPublicAddrWaitTime = 2 * time.Second        // Time to wait for public address after reconnection
+	P2PMaxRetries                  = 5
+	P2PMaxBackoffSeconds           = 32 // Maximum backoff delay in seconds
 
 	// Queue management constants
 	QueueSendTimeout = 100 * time.Millisecond // Timeout for queue send operations to handle temporary congestion
@@ -2207,8 +2208,8 @@ func (t *Tunnel) reannounceP2PInfoAfterReconnect() {
 	}
 	
 	go func() {
-		// Wait for public address to be received again
-		time.Sleep(2 * time.Second)
+		// Wait for public address to be received again after reconnection
+		time.Sleep(P2PReconnectPublicAddrWaitTime)
 		
 		retries := 0
 		for retries < P2PMaxRetries {

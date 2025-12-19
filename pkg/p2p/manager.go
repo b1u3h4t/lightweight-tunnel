@@ -39,24 +39,29 @@ const (
 	QualityCheckCriticalThreshold = 30
 	// PortPredictionRange is the range of ports to try around known port for symmetric NAT
 	PortPredictionRange = 20
+	// PortPredictionSequentialRange is the range of sequential ports to prioritize
+	// Most NATs allocate ports sequentially, so try these first
+	PortPredictionSequentialRange = 5
 )
 
 // Connection represents a P2P UDP connection to a peer
 type Connection struct {
-	LocalAddr          *net.UDPAddr
-	RemoteAddr         *net.UDPAddr
-	Conn               *net.UDPConn
-	PeerIP             net.IP // Tunnel IP of the peer
-	IsLocalNetwork     bool   // Whether this connection is via local network
-	sendQueue          chan []byte
-	stopCh             chan struct{}
-	wg                 sync.WaitGroup
-	lastHandshakeTime  time.Time   // Last time a handshake was sent
-	lastKeepaliveTime  time.Time   // Last time a keepalive was sent
-	lastReceivedTime   time.Time   // Last time data was received
-	estimatedRTT       time.Duration // Estimated round-trip time
-	handshakeStartTime time.Time   // When handshake started (for RTT measurement)
-	mu                 sync.RWMutex // Protects connection state
+	LocalAddr               *net.UDPAddr
+	RemoteAddr              *net.UDPAddr
+	Conn                    *net.UDPConn
+	PeerIP                  net.IP // Tunnel IP of the peer
+	IsLocalNetwork          bool   // Whether this connection is via local network
+	sendQueue               chan []byte
+	stopCh                  chan struct{}
+	wg                      sync.WaitGroup
+	lastHandshakeTime       time.Time     // Last time a handshake was sent
+	lastKeepaliveTime       time.Time     // Last time a keepalive was sent
+	lastReceivedTime        time.Time     // Last time data was received
+	estimatedRTT            time.Duration // Estimated round-trip time
+	handshakeStartTime      time.Time     // When handshake started (for RTT measurement)
+	consecutiveFailures     int           // Number of consecutive failed handshake attempts
+	nextHandshakeAttemptAt  time.Time     // When next handshake attempt is allowed (for rate limiting)
+	mu                      sync.RWMutex  // Protects connection state
 }
 
 // Manager manages P2P connections
@@ -515,6 +520,9 @@ func (m *Manager) handleHandshake(remoteAddr *net.UDPAddr) {
 				conn.handshakeStartTime = time.Time{}
 			}
 			conn.lastReceivedTime = time.Now()
+			// Reset failure counter on successful handshake
+			conn.consecutiveFailures = 0
+			conn.nextHandshakeAttemptAt = time.Time{} // Allow immediate next handshake if needed
 			conn.mu.Unlock()
 		}
 		
@@ -797,9 +805,13 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 	
 	// Priority 1: Try sequential ports first (most common NAT behavior)
 	// Many NATs allocate ports sequentially, so try nearby sequential ports
-	sequentialPorts := []int{
-		basePort + 1, basePort + 2, basePort + 3, basePort + 4, basePort + 5,
-		basePort - 1, basePort - 2, basePort - 3, basePort - 4, basePort - 5,
+	// Generate list programmatically based on PortPredictionSequentialRange
+	var sequentialPorts []int
+	for offset := 1; offset <= PortPredictionSequentialRange; offset++ {
+		sequentialPorts = append(sequentialPorts, basePort+offset)
+	}
+	for offset := 1; offset <= PortPredictionSequentialRange; offset++ {
+		sequentialPorts = append(sequentialPorts, basePort-offset)
 	}
 	
 	for _, predictedPort := range sequentialPorts {
@@ -829,7 +841,7 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 	
 	// Priority 2: Try wider range for less predictable NATs
 	for offset := -PortPredictionRange; offset <= PortPredictionRange; offset++ {
-		if offset == 0 || (offset >= -5 && offset <= 5) {
+		if offset == 0 || (offset >= -PortPredictionSequentialRange && offset <= PortPredictionSequentialRange) {
 			continue // Already handled above
 		}
 		
@@ -905,14 +917,35 @@ func (m *Manager) sendKeepalives() {
 		if !connected {
 			// Continuous handshake mode: keep trying to establish connection
 			// This is key to N2N's high success rate - never give up on P2P
+			// Use exponential backoff to avoid excessive traffic
 			conn.mu.Lock()
+			
+			// Check if we should send handshake now (rate limiting with exponential backoff)
+			if now.Before(conn.nextHandshakeAttemptAt) {
+				conn.mu.Unlock()
+				continue // Too soon, skip this attempt
+			}
+			
 			conn.lastHandshakeTime = now
+			failures := conn.consecutiveFailures
 			conn.mu.Unlock()
 			
 			_, err := m.listener.WriteToUDP(handshakeMsg, conn.RemoteAddr)
 			if err != nil {
 				log.Printf("Continuous handshake send error to %s: %v", ipStr, err)
 			}
+			
+			// Update rate limiting with exponential backoff: 15s, 30s, 60s, 120s (capped)
+			conn.mu.Lock()
+			conn.consecutiveFailures++
+			backoffMultiplier := 1 << uint(failures) // 2^failures
+			if backoffMultiplier > 8 {
+				backoffMultiplier = 8 // Cap at 8x = 120 seconds
+			}
+			nextAttemptDelay := KeepaliveInterval * time.Duration(backoffMultiplier)
+			conn.nextHandshakeAttemptAt = now.Add(nextAttemptDelay)
+			conn.mu.Unlock()
+			
 			continue
 		}
 		
