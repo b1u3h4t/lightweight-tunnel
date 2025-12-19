@@ -629,6 +629,23 @@ func (t *Tunnel) tunReaderServer() {
 		}
 
 		dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
+		
+		// Check if packet is destined for server itself
+		// If so, write it back to TUN so the server's network stack can handle it
+		if dstIP.Equal(t.myTunnelIP) {
+			// Packet is for the server itself - write back to TUN device
+			// This allows the server to respond to pings, TCP connections, etc.
+			if _, err := t.tunFile.Write(packet); err != nil {
+				select {
+				case <-t.stopCh:
+					// Tunnel is stopping, no need to log
+				default:
+					log.Printf("TUN write error (server self): %v", err)
+				}
+				return
+			}
+			continue
+		}
 
 		// Find the client with this destination IP
 		client := t.getClientByIP(dstIP)
@@ -641,7 +658,7 @@ func (t *Tunnel) tunReaderServer() {
 				log.Printf("Client send queue full for %s, dropping packet", dstIP)
 			}
 		}
-		// If no client found, packet is dropped (or could be for server itself)
+		// If no client found, packet is dropped
 	}
 }
 
@@ -1272,11 +1289,39 @@ func (t *Tunnel) routeUpdateLoop() {
 				// Clean stale routes
 				t.routingTable.CleanStaleRoutes(60 * time.Second)
 				
-				// Log routing stats
+				// Log routing stats with more detail
 				stats := t.routingTable.GetRouteStats()
 				log.Printf("Routing stats: %d peers, %d direct, %d relay, %d server",
 					stats["total_peers"], stats["direct_routes"],
 					stats["relay_routes"], stats["server_routes"])
+				
+				// Log individual peer status for debugging
+				peers := t.routingTable.GetAllPeers()
+				for _, peer := range peers {
+					route := t.routingTable.GetRoute(peer.TunnelIP)
+					if route != nil {
+						var routeTypeStr string
+						switch route.Type {
+						case routing.RouteDirect:
+							routeTypeStr = "P2P-DIRECT"
+						case routing.RouteRelay:
+							routeTypeStr = "P2P-RELAY"
+						case routing.RouteServer:
+							routeTypeStr = "SERVER-RELAY"
+						}
+						
+						connStatus := "disconnected"
+						if peer.Connected {
+							connStatus = "connected"
+							if peer.IsLocalConnection {
+								connStatus = "connected-local"
+							}
+						}
+						
+						log.Printf("  Peer %s: route=%s quality=%d status=%s throughServer=%v",
+							peer.TunnelIP, routeTypeStr, route.Quality, connStatus, peer.ThroughServer)
+					}
+				}
 			}
 		}
 	}
@@ -1311,16 +1356,34 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) error {
 					encryptedPacket, err := t.encryptPacket(fullPacket)
 					if err != nil {
 						log.Printf("P2P encryption error: %v", err)
+						// Mark peer as going through server on encryption failure
+						if peer := t.routingTable.GetPeer(dstIP); peer != nil {
+							peer.SetThroughServer(true)
+							t.routingTable.UpdateRoutes()
+						}
 						return t.sendViaServer(packet)
 					}
 					
 					if err := t.p2pManager.SendPacket(dstIP, encryptedPacket); err != nil {
 						log.Printf("P2P send failed to %s, falling back to server: %v", dstIP, err)
+						// Mark peer as going through server on send failure
+						if peer := t.routingTable.GetPeer(dstIP); peer != nil {
+							peer.SetThroughServer(true)
+							// Update routes to switch to server route
+							t.routingTable.UpdateRoutes()
+						}
 						// Fall back to server
 						return t.sendViaServer(packet)
 					}
 					return nil
 				}
+				// P2P not connected despite direct route - update peer state
+				if peer := t.routingTable.GetPeer(dstIP); peer != nil {
+					peer.SetConnected(false)
+					peer.SetThroughServer(true)
+					t.routingTable.UpdateRoutes()
+				}
+				return t.sendViaServer(packet)
 			case routing.RouteRelay:
 				// Send via relay peer
 				// For now, fall back to server (relay implementation can be added later)

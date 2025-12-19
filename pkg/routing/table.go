@@ -69,6 +69,8 @@ func (rt *RoutingTable) updateRouteForPeer(peer *p2p.PeerInfo) {
 	
 	// Check if direct P2P is available
 	if peer.Connected {
+		// Update peer to mark it's not going through server
+		peer.SetThroughServer(false)
 		rt.routes[ipStr] = &Route{
 			Destination: peer.TunnelIP,
 			Type:        RouteDirect,
@@ -83,10 +85,9 @@ func (rt *RoutingTable) updateRouteForPeer(peer *p2p.PeerInfo) {
 	// Relay routing is not implemented yet. Avoid selecting relay routes
 	// as if they were available. Always choose server route as the
 	// fallback when direct P2P is not connected.
+	// Mark peer as going through server
+	peer.SetThroughServer(true)
 	serverQuality := peer.GetQualityScore()
-	if peer.ThroughServer {
-		serverQuality -= ServerRoutePenalty // Penalty for server routing
-	}
 	rt.routes[ipStr] = &Route{
 		Destination: peer.TunnelIP,
 		Type:        RouteServer,
