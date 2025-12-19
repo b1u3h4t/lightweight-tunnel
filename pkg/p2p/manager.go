@@ -21,6 +21,8 @@ const (
 	HandshakeContinuousRetries = 3
 	// HandshakeRetryInterval is the delay between retry phases
 	HandshakeRetryInterval = 1 * time.Second
+	// HandshakeCheckInterval is how often to check connection status during handshake burst
+	HandshakeCheckInterval = 5 // Check every 5th attempt
 	// ReadTimeout is the timeout for UDP read operations
 	ReadTimeout = 1 * time.Second
 	// LocalConnectionTimeout is the timeout to wait for local connection before trying public
@@ -29,6 +31,8 @@ const (
 	KeepaliveInterval = 15 * time.Second
 	// ConnectionStaleTimeout is the timeout after which a connection is considered stale
 	ConnectionStaleTimeout = 60 * time.Second
+	// ConnectionStaleCheckThreshold is the fraction of stale timeout for quality fallback checks
+	ConnectionStaleCheckThreshold = 2 // Check at ConnectionStaleTimeout/2
 	// QualityCheckPoorThreshold is the quality score below which a connection is considered poor
 	QualityCheckPoorThreshold = 50
 	// QualityCheckCriticalThreshold is the quality score below which fallback to server is considered
@@ -349,7 +353,7 @@ func (m *Manager) performHandshake(conn *Connection, isLocal bool) {
 		}
 		
 		// Check if connection established during burst
-		if i > 0 && i%5 == 0 {
+		if i > 0 && i%HandshakeCheckInterval == 0 {
 			m.mu.RLock()
 			connected := m.isPeerConnected(conn.PeerIP.String())
 			m.mu.RUnlock()
@@ -960,7 +964,7 @@ func (m *Manager) checkConnectionQuality() {
 				ipStr, quality, rtt, loss*100, timeSinceLastSeen)
 			
 			// If quality is very poor and connection is stale, consider switching to server relay
-			if quality < QualityCheckCriticalThreshold && timeSinceLastSeen > ConnectionStaleTimeout/2 {
+			if quality < QualityCheckCriticalThreshold && timeSinceLastSeen > ConnectionStaleTimeout/ConnectionStaleCheckThreshold {
 				log.Printf("Connection to %s is poor quality - may need to fallback to server relay", ipStr)
 				// Mark as going through server temporarily
 				peer.SetThroughServer(true)

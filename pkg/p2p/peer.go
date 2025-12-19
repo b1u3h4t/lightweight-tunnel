@@ -70,6 +70,8 @@ func (p *PeerInfo) RecordPacketReceived() {
 
 // CalculatePacketLoss calculates packet loss based on sent/received counters
 // This is a simplified approach - in reality would need sequence numbers
+// Note: This assumes bidirectional traffic equality, which may not hold in practice.
+// For more accurate results, a protocol with sequence numbers and acknowledgments would be needed.
 func (p *PeerInfo) CalculatePacketLoss() float64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
