@@ -39,24 +39,32 @@ const (
 	QualityCheckCriticalThreshold = 30
 	// PortPredictionRange is the range of ports to try around known port for symmetric NAT
 	PortPredictionRange = 20
+	// PortPredictionSequentialRange is the range of sequential ports to prioritize
+	// Most NATs allocate ports sequentially, so try these first
+	PortPredictionSequentialRange = 5
+	// MaxBackoffMultiplier is the maximum multiplier for exponential backoff (caps retry interval)
+	// Max interval = KeepaliveInterval * MaxBackoffMultiplier = 15s * 8 = 120s
+	MaxBackoffMultiplier = 8
 )
 
 // Connection represents a P2P UDP connection to a peer
 type Connection struct {
-	LocalAddr          *net.UDPAddr
-	RemoteAddr         *net.UDPAddr
-	Conn               *net.UDPConn
-	PeerIP             net.IP // Tunnel IP of the peer
-	IsLocalNetwork     bool   // Whether this connection is via local network
-	sendQueue          chan []byte
-	stopCh             chan struct{}
-	wg                 sync.WaitGroup
-	lastHandshakeTime  time.Time   // Last time a handshake was sent
-	lastKeepaliveTime  time.Time   // Last time a keepalive was sent
-	lastReceivedTime   time.Time   // Last time data was received
-	estimatedRTT       time.Duration // Estimated round-trip time
-	handshakeStartTime time.Time   // When handshake started (for RTT measurement)
-	mu                 sync.RWMutex // Protects connection state
+	LocalAddr               *net.UDPAddr
+	RemoteAddr              *net.UDPAddr
+	Conn                    *net.UDPConn
+	PeerIP                  net.IP // Tunnel IP of the peer
+	IsLocalNetwork          bool   // Whether this connection is via local network
+	sendQueue               chan []byte
+	stopCh                  chan struct{}
+	wg                      sync.WaitGroup
+	lastHandshakeTime       time.Time     // Last time a handshake was sent
+	lastKeepaliveTime       time.Time     // Last time a keepalive was sent
+	lastReceivedTime        time.Time     // Last time data was received
+	estimatedRTT            time.Duration // Estimated round-trip time
+	handshakeStartTime      time.Time     // When handshake started (for RTT measurement)
+	consecutiveFailures     int           // Number of consecutive failed handshake attempts
+	nextHandshakeAttemptAt  time.Time     // When next handshake attempt is allowed (for rate limiting)
+	mu                      sync.RWMutex  // Protects connection state
 }
 
 // Manager manages P2P connections
@@ -505,14 +513,19 @@ func (m *Manager) handleHandshake(remoteAddr *net.UDPAddr) {
 			conn.RemoteAddr = remoteAddr
 			conn.IsLocalNetwork = isLocalConnection
 			
-			// Measure RTT
+			// Measure RTT only once - on first successful handshake response
 			conn.mu.Lock()
 			if !conn.handshakeStartTime.IsZero() {
 				rtt := time.Since(conn.handshakeStartTime)
 				conn.estimatedRTT = rtt
 				log.Printf("P2P RTT to %s: %v", ipStr, rtt)
+				// Reset handshakeStartTime to prevent logging RTT repeatedly
+				conn.handshakeStartTime = time.Time{}
 			}
 			conn.lastReceivedTime = time.Now()
+			// Reset failure counter on successful handshake
+			conn.consecutiveFailures = 0
+			conn.nextHandshakeAttemptAt = time.Time{} // Allow immediate next handshake if needed
 			conn.mu.Unlock()
 		}
 		
@@ -763,7 +776,7 @@ func (m *Manager) CanEstablishP2PWith(peerIP net.IP) bool {
 }
 
 // connectWithPortPrediction attempts connection using port prediction for symmetric NAT
-// Uses "birthday paradox" approach: try multiple predicted ports simultaneously
+// Uses sequential port allocation pattern which is most common in NATs
 func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP) error {
 	ipStr := peerTunnelIP.String()
 	
@@ -775,9 +788,6 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 	
 	basePort := publicAddr.Port
 	log.Printf("Symmetric NAT port prediction: trying ports around %d for %s", basePort, ipStr)
-	
-	// Try a range of ports around the known port
-	// Symmetric NATs often allocate ports sequentially
 	
 	// Create the primary connection with the known port
 	primaryConn := &Connection{
@@ -796,14 +806,17 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 	// Start handshake to primary port
 	go m.performHandshake(primaryConn, false)
 	
-	// Also try predicted ports (but don't store connections to avoid leaks)
-	// These are best-effort attempts that share the stop channel with primary
-	for offset := -PortPredictionRange; offset <= PortPredictionRange; offset++ {
-		if offset == 0 {
-			continue // Already handled as primary
-		}
-		
-		predictedPort := basePort + offset
+	// Priority 1: Try sequential ports first (most common NAT behavior)
+	// Many NATs allocate ports sequentially, so try nearby sequential ports
+	// Generate list programmatically based on PortPredictionSequentialRange
+	// Pre-allocate slice for efficiency
+	sequentialPorts := make([]int, 0, PortPredictionSequentialRange*2)
+	for offset := 1; offset <= PortPredictionSequentialRange; offset++ {
+		sequentialPorts = append(sequentialPorts, basePort+offset)
+		sequentialPorts = append(sequentialPorts, basePort-offset)
+	}
+	
+	for _, predictedPort := range sequentialPorts {
 		if predictedPort < 1024 || predictedPort > 65535 {
 			continue // Skip invalid ports
 		}
@@ -814,7 +827,6 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 		}
 		
 		// Create temporary connection for prediction attempt
-		// Use primary connection's stop channel so it stops when primary succeeds
 		tempConn := &Connection{
 			RemoteAddr:         predictedAddr,
 			PeerIP:             peerTunnelIP,
@@ -829,7 +841,38 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 		go m.performHandshake(tempConn, false)
 	}
 	
-	log.Printf("Started port prediction handshake for %s (trying %d ports)", ipStr, PortPredictionRange*2)
+	// Priority 2: Try wider range for less predictable NATs
+	for offset := -PortPredictionRange; offset <= PortPredictionRange; offset++ {
+		if offset == 0 || (offset >= -PortPredictionSequentialRange && offset <= PortPredictionSequentialRange) {
+			continue // Already handled above
+		}
+		
+		predictedPort := basePort + offset
+		if predictedPort < 1024 || predictedPort > 65535 {
+			continue // Skip invalid ports
+		}
+		
+		predictedAddr := &net.UDPAddr{
+			IP:   publicAddr.IP,
+			Port: predictedPort,
+		}
+		
+		// Create temporary connection for prediction attempt
+		tempConn := &Connection{
+			RemoteAddr:         predictedAddr,
+			PeerIP:             peerTunnelIP,
+			IsLocalNetwork:     false,
+			sendQueue:          make(chan []byte, 100),
+			stopCh:             primaryConn.stopCh, // Share stop channel
+			handshakeStartTime: time.Now(),
+			lastHandshakeTime:  time.Now(),
+		}
+		
+		// Start handshake to predicted port (will stop when primary succeeds)
+		go m.performHandshake(tempConn, false)
+	}
+	
+	log.Printf("Started port prediction handshake for %s (sequential + wide range)", ipStr)
 	return nil
 }
 
@@ -852,11 +895,13 @@ func (m *Manager) keepaliveLoop() {
 }
 
 // sendKeepalives sends keepalive packets to all connected peers
+// Also sends periodic handshakes to not-yet-connected peers (continuous handshake mode)
 func (m *Manager) sendKeepalives() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
 	keepaliveMsg := []byte("P2P_KEEPALIVE")
+	handshakeMsg := []byte("P2P_HANDSHAKE")
 	now := time.Now()
 	
 	for ipStr, conn := range m.connections {
@@ -872,6 +917,37 @@ func (m *Manager) sendKeepalives() {
 		peer.mu.RUnlock()
 		
 		if !connected {
+			// Continuous handshake mode: keep trying to establish connection
+			// This is key to N2N's high success rate - never give up on P2P
+			// Use exponential backoff to avoid excessive traffic
+			conn.mu.Lock()
+			
+			// Check if we should send handshake now (rate limiting with exponential backoff)
+			if now.Before(conn.nextHandshakeAttemptAt) {
+				conn.mu.Unlock()
+				continue // Too soon, skip this attempt
+			}
+			
+			conn.lastHandshakeTime = now
+			failures := conn.consecutiveFailures
+			conn.mu.Unlock()
+			
+			_, err := m.listener.WriteToUDP(handshakeMsg, conn.RemoteAddr)
+			if err != nil {
+				log.Printf("Continuous handshake send error to %s: %v", ipStr, err)
+			}
+			
+			// Update rate limiting with exponential backoff: 15s, 30s, 60s, 120s (capped)
+			conn.mu.Lock()
+			conn.consecutiveFailures++
+			backoffMultiplier := 1 << uint(failures) // 2^failures
+			if backoffMultiplier > MaxBackoffMultiplier {
+				backoffMultiplier = MaxBackoffMultiplier
+			}
+			nextAttemptDelay := KeepaliveInterval * time.Duration(backoffMultiplier)
+			conn.nextHandshakeAttemptAt = now.Add(nextAttemptDelay)
+			conn.mu.Unlock()
+			
 			continue
 		}
 		
@@ -880,15 +956,18 @@ func (m *Manager) sendKeepalives() {
 			log.Printf("P2P connection to %s is stale (last seen %v ago), attempting refresh", 
 				ipStr, now.Sub(lastSeen))
 			
-			// Mark as disconnected and will trigger reconnection
+			// Mark as disconnected and will trigger reconnection via continuous handshake
 			peer.SetConnected(false)
 			
-			// Retry handshake
-			go m.performHandshake(conn, conn.IsLocalNetwork)
+			// Send immediate handshake to try to recover
+			_, err := m.listener.WriteToUDP(handshakeMsg, conn.RemoteAddr)
+			if err != nil {
+				log.Printf("Stale connection handshake error to %s: %v", ipStr, err)
+			}
 			continue
 		}
 		
-		// Send keepalive
+		// Send keepalive to maintain NAT mapping
 		conn.mu.Lock()
 		conn.lastKeepaliveTime = now
 		conn.mu.Unlock()

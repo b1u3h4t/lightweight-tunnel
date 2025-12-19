@@ -40,10 +40,11 @@ const (
 	IPv4MinHeaderLen = 20
 
 	// P2P timing constants
-	P2PRegistrationDelay = 100 * time.Millisecond // Delay to ensure peer registration completes
-	P2PHandshakeWaitTime = 2 * time.Second        // Time to wait for P2P handshake to complete before updating routes
-	P2PMaxRetries        = 5
-	P2PMaxBackoffSeconds = 32 // Maximum backoff delay in seconds
+	P2PRegistrationDelay           = 100 * time.Millisecond // Delay to ensure peer registration completes
+	P2PHandshakeWaitTime           = 2 * time.Second        // Time to wait for P2P handshake to complete before updating routes
+	P2PReconnectPublicAddrWaitTime = 2 * time.Second        // Time to wait for public address after reconnection
+	P2PMaxRetries                  = 5
+	P2PMaxBackoffSeconds           = 32 // Maximum backoff delay in seconds
 
 	// Queue management constants
 	QueueSendTimeout = 100 * time.Millisecond // Timeout for queue send operations to handle temporary congestion
@@ -950,6 +951,10 @@ func (t *Tunnel) netReader() {
 
 			// Successfully reconnected, continue reading
 			log.Printf("Reconnection successful, resuming packet reception")
+			
+			// Re-announce P2P info after reconnection to re-establish P2P connections
+			t.reannounceP2PInfoAfterReconnect()
+			
 			continue
 		}
 
@@ -1097,6 +1102,10 @@ func (t *Tunnel) netWriter() {
 
 				// Try writing once more after reconnect
 				log.Printf("Reconnection successful, retrying packet send")
+				
+				// Re-announce P2P info after reconnection to re-establish P2P connections
+				t.reannounceP2PInfoAfterReconnect()
+				
 				if t.conn != nil {
 					if err2 := t.conn.WritePacket(encryptedPacket); err2 != nil {
 						log.Printf("Network write retry failed: %v, packet will be lost", err2)
@@ -1163,6 +1172,10 @@ func (t *Tunnel) keepalive() {
 				}
 
 				log.Printf("Reconnection successful, keepalive will resume")
+				
+				// Re-announce P2P info after reconnection to re-establish P2P connections
+				t.reannounceP2PInfoAfterReconnect()
+				
 				// Don't return; let loop continue with the next tick
 			}
 		}
@@ -2186,6 +2199,35 @@ func (t *Tunnel) rotateCipher(newKey string) error {
 	t.cipher = newCipher
 	t.cipherMux.Unlock()
 	return nil
+}
+
+// reannounceP2PInfoAfterReconnect re-announces P2P info after reconnection with retry logic
+func (t *Tunnel) reannounceP2PInfoAfterReconnect() {
+	if !t.config.P2PEnabled || t.p2pManager == nil {
+		return
+	}
+	
+	go func() {
+		// Wait for public address to be received again after reconnection
+		time.Sleep(P2PReconnectPublicAddrWaitTime)
+		
+		retries := 0
+		for retries < P2PMaxRetries {
+			if err := t.announcePeerInfo(); err != nil {
+				log.Printf("Failed to re-announce P2P info after reconnection (attempt %d/%d): %v", 
+					retries+1, P2PMaxRetries, err)
+				retries++
+				backoffSeconds := 1 << uint(retries)
+				if backoffSeconds > P2PMaxBackoffSeconds {
+					backoffSeconds = P2PMaxBackoffSeconds
+				}
+				time.Sleep(time.Duration(backoffSeconds) * time.Second)
+			} else {
+				log.Printf("Successfully re-announced P2P info after reconnection")
+				break
+			}
+		}
+	}()
 }
 
 // announcePeerInfo sends peer information to server (client mode)
