@@ -505,12 +505,14 @@ func (m *Manager) handleHandshake(remoteAddr *net.UDPAddr) {
 			conn.RemoteAddr = remoteAddr
 			conn.IsLocalNetwork = isLocalConnection
 			
-			// Measure RTT
+			// Measure RTT only once - on first successful handshake response
 			conn.mu.Lock()
 			if !conn.handshakeStartTime.IsZero() {
 				rtt := time.Since(conn.handshakeStartTime)
 				conn.estimatedRTT = rtt
 				log.Printf("P2P RTT to %s: %v", ipStr, rtt)
+				// Reset handshakeStartTime to prevent logging RTT repeatedly
+				conn.handshakeStartTime = time.Time{}
 			}
 			conn.lastReceivedTime = time.Now()
 			conn.mu.Unlock()

@@ -950,6 +950,10 @@ func (t *Tunnel) netReader() {
 
 			// Successfully reconnected, continue reading
 			log.Printf("Reconnection successful, resuming packet reception")
+			
+			// Re-announce P2P info after reconnection to re-establish P2P connections
+			t.reannounceP2PInfoAfterReconnect()
+			
 			continue
 		}
 
@@ -1097,6 +1101,10 @@ func (t *Tunnel) netWriter() {
 
 				// Try writing once more after reconnect
 				log.Printf("Reconnection successful, retrying packet send")
+				
+				// Re-announce P2P info after reconnection to re-establish P2P connections
+				t.reannounceP2PInfoAfterReconnect()
+				
 				if t.conn != nil {
 					if err2 := t.conn.WritePacket(encryptedPacket); err2 != nil {
 						log.Printf("Network write retry failed: %v, packet will be lost", err2)
@@ -1163,6 +1171,10 @@ func (t *Tunnel) keepalive() {
 				}
 
 				log.Printf("Reconnection successful, keepalive will resume")
+				
+				// Re-announce P2P info after reconnection to re-establish P2P connections
+				t.reannounceP2PInfoAfterReconnect()
+				
 				// Don't return; let loop continue with the next tick
 			}
 		}
@@ -2186,6 +2198,35 @@ func (t *Tunnel) rotateCipher(newKey string) error {
 	t.cipher = newCipher
 	t.cipherMux.Unlock()
 	return nil
+}
+
+// reannounceP2PInfoAfterReconnect re-announces P2P info after reconnection with retry logic
+func (t *Tunnel) reannounceP2PInfoAfterReconnect() {
+	if !t.config.P2PEnabled || t.p2pManager == nil {
+		return
+	}
+	
+	go func() {
+		// Wait for public address to be received again
+		time.Sleep(2 * time.Second)
+		
+		retries := 0
+		for retries < P2PMaxRetries {
+			if err := t.announcePeerInfo(); err != nil {
+				log.Printf("Failed to re-announce P2P info after reconnection (attempt %d/%d): %v", 
+					retries+1, P2PMaxRetries, err)
+				retries++
+				backoffSeconds := 1 << uint(retries)
+				if backoffSeconds > P2PMaxBackoffSeconds {
+					backoffSeconds = P2PMaxBackoffSeconds
+				}
+				time.Sleep(time.Duration(backoffSeconds) * time.Second)
+			} else {
+				log.Printf("Successfully re-announced P2P info after reconnection")
+				break
+			}
+		}
+	}()
 }
 
 // announcePeerInfo sends peer information to server (client mode)
