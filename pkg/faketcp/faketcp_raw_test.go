@@ -2,8 +2,10 @@ package faketcp
 
 import "testing"
 
+const minRawRecvQueueSize = 2048
+
 func TestRawRecvQueueSize(t *testing.T) {
-	if rawRecvQueueSize < 2048 {
+	if rawRecvQueueSize < minRawRecvQueueSize {
 		t.Fatalf("rawRecvQueueSize too small: %d", rawRecvQueueSize)
 	}
 }
