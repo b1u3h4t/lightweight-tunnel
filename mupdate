@@ -48,17 +48,15 @@ fi
 echo "Update completed."
 restart_msg="Restart the lightweight-tunnel systemd service to load the new binary."
 restart_example="For example: sudo systemctl restart lightweight-tunnel (or your custom service name, such as lightweight-tunnel-server)."
-running_service=false
+running_service=""
 if command -v systemctl >/dev/null 2>&1; then
-  units=$(systemctl list-units --type=service --state=active 'lightweight-tunnel*' 2>/dev/null || true)
-  if printf "%s" "$units" | grep -q 'lightweight-tunnel'; then
-    running_service=true
-  fi
+  units=$(systemctl list-units --type=service --state=active 'lightweight-tunnel*' --no-legend --no-pager 2>/dev/null || true)
+  running_service=$(printf "%s" "$units" | awk '{print $1}' | head -n1)
 fi
-if [ "$running_service" = true ]; then
-  echo "Detected running lightweight-tunnel systemd service."
+if [ -n "$running_service" ]; then
+  echo "Detected running lightweight-tunnel systemd service: $running_service"
   echo "$restart_msg"
-  echo "$restart_example"
+  echo "sudo systemctl restart $running_service"
 else
   echo "If a lightweight-tunnel systemd service is running:"
   echo "$restart_msg"
