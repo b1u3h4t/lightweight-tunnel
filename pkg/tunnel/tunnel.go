@@ -177,7 +177,7 @@ func prependPacketType(packet []byte, packetType byte) ([]byte, bool) {
 	origLen := len(packet)
 	if cap(packet) > origLen {
 		packet = packet[:origLen+1]
-		copy(packet[1:], packet[:origLen])
+		copy(packet[1:origLen+1], packet[:origLen])
 		packet[0] = packetType
 		return packet, true
 	}
