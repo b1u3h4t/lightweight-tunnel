@@ -1,7 +1,10 @@
 package tunnel
 
-import (
-	"encoding/binary"
+import "encoding/binary"
+
+const (
+	quicMinEncryptedPayload = 16
+	maxEntropySampleSize    = 8
 )
 
 var encryptedServicePorts = map[uint16]struct{}{
@@ -76,8 +79,12 @@ func looksLikeTLS(payload []byte) bool {
 		return false
 	}
 	if recordType == 0x16 || recordType == 0x14 || recordType == 0x17 || recordType == 0x15 {
-		// Accept TLS 1.0 - 1.3
-		return versionMinor <= 0x04
+		switch versionMinor {
+		case 0x00, 0x01, 0x02, 0x03, 0x04:
+			return true
+		default:
+			return false
+		}
 	}
 	return false
 }
@@ -92,7 +99,7 @@ func looksLikeQUIC(payload []byte) bool {
 		return true
 	}
 	// Short header still likely encrypted; treat as encrypted when payload is non-empty.
-	return len(payload) > 16
+	return len(payload) > quicMinEncryptedPayload
 }
 
 func looksLikeAEADProxy(payload []byte) bool {
@@ -113,15 +120,16 @@ func looksLikeAEADProxy(payload []byte) bool {
 		// If it looks like high-entropy nonce (non-printable and non-ASCII), treat as encrypted.
 		nonPrintable := 0
 		checkLen := len(payload)
-		if checkLen > 8 {
-			checkLen = 8
+		if checkLen > maxEntropySampleSize {
+			checkLen = maxEntropySampleSize
 		}
+		threshold := checkLen/2 + 1
 		for i := 0; i < checkLen; i++ {
 			if payload[i] < 0x20 || payload[i] > 0x7E {
 				nonPrintable++
 			}
 		}
-		return nonPrintable >= checkLen-1
+		return nonPrintable >= threshold
 	}
 }
 

@@ -6,7 +6,10 @@ import (
 	"testing"
 
 	"github.com/openbmx/lightweight-tunnel/pkg/crypto"
+	"github.com/openbmx/lightweight-tunnel/pkg/xdp"
 )
+
+const testCipherKey = "test-key-bypass-double"
 
 func buildTLSPacket(dstPort uint16) []byte {
 	ip := make([]byte, 20+20+5)
@@ -48,12 +51,12 @@ func TestEncryptDecryptSkipDoubleEncryption(t *testing.T) {
 	ip := buildTLSPacket(443)
 	packet := append([]byte{PacketTypeData}, ip...)
 
-	c, err := crypto.NewCipher("skip-double-encryption")
+	c, err := crypto.NewCipher(testCipherKey)
 	if err != nil {
 		t.Fatalf("cipher init failed: %v", err)
 	}
 
-	tun := &Tunnel{cipher: c}
+	tun := &Tunnel{cipher: c, xdpAccel: xdp.NewAccelerator(false)}
 
 	encrypted, err := tun.encryptPacket(packet)
 	if err != nil {
