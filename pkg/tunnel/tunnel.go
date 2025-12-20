@@ -60,6 +60,28 @@ const (
 	DefaultRouteAdvertInterval = 60 * time.Second
 )
 
+// enqueueWithTimeout attempts to enqueue a packet, waiting briefly for capacity.
+// Returns true when the packet was queued, or false when stopCh is closed or the timeout elapses.
+func enqueueWithTimeout(queue chan []byte, packet []byte, stopCh <-chan struct{}) bool {
+	select {
+	case queue <- packet:
+		return true
+	default:
+	}
+
+	timer := time.NewTimer(QueueSendTimeout)
+	defer timer.Stop()
+
+	select {
+	case queue <- packet:
+		return true
+	case <-stopCh:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
 // ClientConnection represents a single client connection
 type ClientConnection struct {
 	conn         faketcp.ConnAdapter // Changed to interface for both UDP and Raw socket modes
@@ -69,7 +91,7 @@ type ClientConnection struct {
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
-	lastPeerInfo string         // Last peer info string sent by this client
+	lastPeerInfo string // Last peer info string sent by this client
 	cipher       *crypto.Cipher
 	cipherGen    uint64
 	lastRecvTime time.Time // Last time we received a packet from this client
@@ -843,12 +865,13 @@ func (t *Tunnel) tunReader() {
 				}
 			} else {
 				// Default: queue for server
-				select {
-				case t.sendQueue <- packet:
-				case <-t.stopCh:
-					return
-				default:
-					log.Printf("Send queue full, dropping packet")
+				if !enqueueWithTimeout(t.sendQueue, packet, t.stopCh) {
+					select {
+					case <-t.stopCh:
+						return
+					default:
+						log.Printf("Send queue full after timeout, dropping packet")
+					}
 				}
 			}
 		}
@@ -990,9 +1013,9 @@ func (t *Tunnel) netReader() {
 		t.lastRecvMux.Unlock()
 
 		if timeSinceLastRecv > IdleConnectionTimeout {
-			log.Printf("Connection idle for %v (threshold: %v), forcing reconnection...", 
+			log.Printf("Connection idle for %v (threshold: %v), forcing reconnection...",
 				timeSinceLastRecv, IdleConnectionTimeout)
-			
+
 			// Close and clear current connection
 			t.connMux.Lock()
 			if t.conn != nil {
@@ -1100,12 +1123,13 @@ func (t *Tunnel) netReader() {
 		switch packetType {
 		case PacketTypeData:
 			// Queue for TUN device
-			select {
-			case t.recvQueue <- payload:
-			case <-t.stopCh:
-				return
-			default:
-				log.Printf("Receive queue full, dropping packet")
+			if !enqueueWithTimeout(t.recvQueue, payload, t.stopCh) {
+				select {
+				case <-t.stopCh:
+					return
+				default:
+					log.Printf("Receive queue full after timeout, dropping packet")
+				}
 			}
 		case PacketTypeKeepalive:
 			// Keepalive received, no action needed
@@ -1326,7 +1350,7 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 		client.mu.RUnlock()
 
 		if timeSinceLastRecv > IdleConnectionTimeout {
-			log.Printf("Client connection from %s idle for %v (threshold: %v), closing...", 
+			log.Printf("Client connection from %s idle for %v (threshold: %v), closing...",
 				client.conn.RemoteAddr(), timeSinceLastRecv, IdleConnectionTimeout)
 			client.stopOnce.Do(func() {
 				close(client.stopCh)
