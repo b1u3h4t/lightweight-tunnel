@@ -471,7 +471,31 @@ sudo ./lightweight-tunnel \
   ],
   "p2p_enabled": true,
   "p2p_port": 19000,
-  "enable_nat_detection": true
+  "enable_nat_detection": true,
+  "enable_xdp": true,
+  "enable_kernel_tune": true
+}
+```
+
+#### 服务端配置示例（含优化开关）
+
+**config-server.json**：
+
+```json
+{
+  "mode": "server",
+  "local_addr": "0.0.0.0:9000",
+  "tunnel_addr": "10.0.0.1/24",
+  "key": "请修改为您的强密钥",
+  "mtu": 0,
+  "tun_name": "tun0",
+  "routes": [],
+  "multi_client": true,
+  "max_clients": 100,
+  "client_isolation": false,
+  "enable_nat_detection": true,
+  "enable_xdp": true,
+  "enable_kernel_tune": true
 }
 ```
 
@@ -517,6 +541,12 @@ sudo ./lightweight-tunnel -c config-client.json
         启用 P2P 直连（默认：true）
   -p2p-port int
         P2P UDP 监听端口（默认：0，自动分配）
+  -xdp
+        启用 eBPF/XDP 风格快速路径分类（默认：true）
+  -kernel-tune
+        启用内核调优（默认：true），best-effort 设置：
+          net.ipv4.tcp_fastopen=3
+          net.ipv4.tcp_congestion_control=bbr2（内核支持时生效）
 
 服务端专用：
   -multi-client

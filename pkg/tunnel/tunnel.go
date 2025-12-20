@@ -23,6 +23,7 @@ import (
 	"github.com/openbmx/lightweight-tunnel/pkg/nat"
 	"github.com/openbmx/lightweight-tunnel/pkg/p2p"
 	"github.com/openbmx/lightweight-tunnel/pkg/routing"
+	"github.com/openbmx/lightweight-tunnel/pkg/xdp"
 )
 
 const (
@@ -153,6 +154,8 @@ type Tunnel struct {
 	packetPool    *sync.Pool
 	packetBufSize int
 
+	xdpAccel *xdp.Accelerator
+
 	// P2P and routing
 	p2pManager    *p2p.Manager          // P2P connection manager
 	routingTable  *routing.RoutingTable // Routing table
@@ -220,6 +223,9 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 			"请使用以下命令运行: sudo ./lightweight-tunnel -m %s ...\n"+
 			"错误详情: %v", cfg.Mode, err)
 	}
+
+	// Apply kernel-level optimizations (best effort)
+	applyKernelTunings(cfg.EnableKernelTune)
 
 	log.Printf("✅ 使用 Raw Socket 模式 (真正的TCP伪装，类似udp2raw)")
 	log.Printf("✅ 性能优化：低延迟，高吞吐量")
@@ -297,6 +303,15 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	if packetBufSize < packetBufferSlack {
 		packetBufSize = packetBufferSlack
 	}
+
+	var accel *xdp.Accelerator
+	if cfg.EnableXDP {
+		accel = xdp.NewAccelerator(true)
+		log.Println("✅ eBPF/XDP fast path enabled for encrypted-flow classification")
+	} else {
+		log.Println("XDP fast path disabled, using regular path")
+	}
+
 	t := &Tunnel{
 		config:         cfg,
 		configFilePath: configFilePath,
@@ -307,6 +322,7 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 		packetBufSize:  packetBufSize,
 		clientRoutes:   make(map[*ClientConnection][]string),
 		allClients:     make(map[*ClientConnection]struct{}),
+		xdpAccel:       accel,
 	}
 	t.packetPool = &sync.Pool{
 		New: func() any {
@@ -2415,12 +2431,57 @@ func GetPeerIP(tunnelAddr string) (string, error) {
 	return fmt.Sprintf("%s/%s", ip4.String(), parts[1]), nil
 }
 
+func applyKernelTunings(enabled bool) {
+	if !enabled {
+		return
+	}
+	// Enable TCP Fast Open for client+server (3)
+	if err := runSysctl("net.ipv4.tcp_fastopen=3"); err != nil {
+		log.Printf("⚠️  Failed to enable TCP Fast Open: %v", err)
+	} else {
+		log.Println("TCP Fast Open enabled (net.ipv4.tcp_fastopen=3)")
+	}
+
+	// Prefer BBR2 congestion control if available; fallback silently if kernel lacks it.
+	if err := runSysctl("net.ipv4.tcp_congestion_control=bbr2"); err != nil {
+		log.Printf("⚠️  Failed to set BBR2 congestion control (kernel may not support bbr2): %v", err)
+	} else {
+		log.Println("BBR2 congestion control enabled")
+	}
+}
+
+func runSysctl(setting string) error {
+	cmd := exec.Command("sysctl", "-w", setting)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%v (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func (t *Tunnel) shouldSkipOuterEncryption(data []byte) bool {
+	if len(data) < 1 || data[0] != PacketTypeData {
+		return false
+	}
+
+	classifier := func(pkt []byte) bool {
+		return isLikelyEncryptedTraffic(pkt)
+	}
+	ipPacket := data[1:]
+	if t.xdpAccel != nil {
+		return t.xdpAccel.Classify(ipPacket, classifier)
+	}
+	return classifier(ipPacket)
+}
+
 // encryptPacket encrypts a packet if cipher is available
 func (t *Tunnel) encryptPacket(data []byte) ([]byte, error) {
 	t.cipherMux.RLock()
 	c := t.cipher
 	t.cipherMux.RUnlock()
 	if c == nil {
+		return data, nil
+	}
+	if t.shouldSkipOuterEncryption(data) {
 		return data, nil
 	}
 	return c.Encrypt(data)
@@ -2455,6 +2516,10 @@ func (t *Tunnel) decryptWithFallback(data []byte) ([]byte, *crypto.Cipher, uint6
 		}
 	}
 
+	if (active != nil || prev != nil) && isPlainPassThroughPacket(data) {
+		return data, nil, 0, nil
+	}
+
 	if activeErr != nil {
 		return nil, nil, 0, activeErr
 	}
@@ -2472,6 +2537,9 @@ func (t *Tunnel) decryptPacketForServer(data []byte) ([]byte, *crypto.Cipher, ui
 }
 
 func (t *Tunnel) encryptForClient(client *ClientConnection, data []byte) ([]byte, error) {
+	if t.shouldSkipOuterEncryption(data) {
+		return data, nil
+	}
 	if client != nil {
 		if c, _ := client.getCipher(); c != nil {
 			return c.Encrypt(data)
@@ -2492,7 +2560,6 @@ func (t *Tunnel) deactivatePrevCipher(prev *crypto.Cipher, reason string) {
 	}
 
 	t.cipherMux.Lock()
-	prevGen := t.prevCipherGen
 	if t.prevCipher != prev {
 		t.cipherMux.Unlock()
 		return
@@ -2501,22 +2568,6 @@ func (t *Tunnel) deactivatePrevCipher(prev *crypto.Cipher, reason string) {
 	t.prevCipherGen = 0
 	t.prevCipherExp = time.Time{}
 	t.cipherMux.Unlock()
-
-	t.allClientsMux.RLock()
-	clients := make([]*ClientConnection, 0, len(t.allClients))
-	for client := range t.allClients {
-		clients = append(clients, client)
-	}
-	t.allClientsMux.RUnlock()
-
-	for _, client := range clients {
-		if _, gen := client.getCipher(); gen != 0 && gen == prevGen {
-			client.stopOnce.Do(func() {
-				_ = client.conn.Close()
-				close(client.stopCh)
-			})
-		}
-	}
 
 	log.Printf("Deactivated previous cipher (%s)", reason)
 }

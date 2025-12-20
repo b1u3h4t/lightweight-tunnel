@@ -168,10 +168,12 @@ func TestKeyRotationGraceAndInvalidation(t *testing.T) {
 		t.Fatalf("expected previous cipher to be cleared once new key is in use")
 	}
 
+	// Client should remain connected for seamless rotation; old cipher traffic
+	// will simply fail decryption instead of tearing down the tunnel.
 	select {
 	case <-client.stopCh:
+		t.Fatalf("client with old key should remain connected after new key is active")
 	default:
-		t.Fatalf("expected client with old key to be disconnected after new key is active")
 	}
 
 	if _, _, _, err := tun.decryptPacketForServer(encryptedOld); err == nil {
