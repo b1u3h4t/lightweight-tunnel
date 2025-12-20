@@ -21,8 +21,10 @@ const (
 	HandshakeContinuousRetries = 3
 	// HandshakeRetryInterval is the delay between retry phases
 	HandshakeRetryInterval = 1 * time.Second
-	// HandshakeCheckInterval is how often to check connection status during handshake burst
+	// HandshakeCheckInterval is how often to check connection status during handshake burst (first half)
 	HandshakeCheckInterval = 5 // Check every 5th attempt
+	// HandshakeCheckIntervalAccelerated is how often to check in second half when connection more likely
+	HandshakeCheckIntervalAccelerated = 2 // Check every 2nd attempt in second half
 	// ReadTimeout is the timeout for UDP read operations
 	ReadTimeout = 1 * time.Second
 	// LocalConnectionTimeout is the timeout to wait for local connection before trying public
@@ -389,7 +391,7 @@ func (m *Manager) performHandshakeInternal(conn *Connection, isLocal bool) {
 		// Check more frequently towards the end when connection is more likely established
 		checkInterval := HandshakeCheckInterval
 		if i > HandshakeAttempts/2 {
-			checkInterval = 2 // Check more frequently in second half
+			checkInterval = HandshakeCheckIntervalAccelerated // Check more frequently in second half
 		}
 		
 		if i > 0 && i%checkInterval == 0 {
@@ -431,8 +433,8 @@ func (m *Manager) performHandshakeInternal(conn *Connection, isLocal bool) {
 		// Send another burst
 		log.Printf("Retry phase %d/%d for %s", retry+1, HandshakeContinuousRetries, conn.PeerIP)
 		for i := 0; i < HandshakeAttempts/2; i++ {
-			// Check connection status every few packets in retry phase to reduce lock contention
-			if i > 0 && i%2 == 0 {
+			// Check connection status periodically in retry phase to reduce lock contention
+			if i > 0 && i%HandshakeCheckIntervalAccelerated == 0 {
 				m.mu.RLock()
 				connected := m.isPeerConnected(conn.PeerIP.String())
 				m.mu.RUnlock()
