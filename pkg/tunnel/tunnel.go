@@ -175,7 +175,7 @@ type Tunnel struct {
 // boolean indicating whether the original backing buffer was reused.
 func prependPacketType(packet []byte, packetType byte) ([]byte, bool) {
 	origLen := len(packet)
-	if cap(packet) > origLen {
+	if cap(packet) >= origLen+1 {
 		packet = packet[:origLen+1]
 		// copy handles overlapping regions; shift data right by one.
 		copy(packet[1:], packet[:origLen])
@@ -203,7 +203,7 @@ func (t *Tunnel) releasePacketBuffer(buf []byte) {
 	if t.packetPool == nil || t.packetBufSize == 0 {
 		return
 	}
-	if cap(buf) == t.packetBufSize {
+	if cap(buf) >= t.packetBufSize {
 		t.packetPool.Put(buf[:t.packetBufSize])
 	}
 }
@@ -294,6 +294,9 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	}
 
 	packetBufSize := cfg.MTU + packetBufferSlack
+	if packetBufSize < packetBufferSlack {
+		packetBufSize = packetBufferSlack
+	}
 	t := &Tunnel{
 		config:         cfg,
 		configFilePath: configFilePath,
