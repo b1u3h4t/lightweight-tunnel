@@ -114,9 +114,21 @@ func NewDetector(testPort int, timeout time.Duration) *Detector {
 }
 
 // DetectNATType attempts to detect the NAT type
-// This is a simplified detection that uses basic UDP socket behavior
+// Uses STUN protocol (RFC 5389) for reliable detection when possible
 func (d *Detector) DetectNATType(serverAddr string) (NATType, error) {
-	// Step 1: Try to detect if we have a public IP (no NAT)
+	// Step 1: Try STUN-based detection first (most reliable)
+	if serverAddr != "" {
+		natType, err := d.detectWithSTUN(serverAddr)
+		if err != nil {
+			log.Printf("STUN detection failed, falling back to simple detection: %v", err)
+		} else {
+			log.Printf("STUN-based NAT detection successful: %s", natType)
+			return natType, nil
+		}
+	}
+
+	// Step 2: Fallback to local detection if STUN unavailable
+	// Try to detect if we have a public IP (no NAT)
 	hasPublicIP, err := d.hasPublicIP()
 	if err != nil {
 		log.Printf("Failed to check for public IP: %v", err)
@@ -125,25 +137,46 @@ func (d *Detector) DetectNATType(serverAddr string) (NATType, error) {
 		return NATNone, nil
 	}
 
-	// Step 2: Test for symmetric NAT by checking if port changes per destination
-	// This requires connecting to multiple servers, which we'll simplify
-	// For now, we'll use a heuristic based on socket binding behavior
-
-	// Create two UDP connections to different destinations
+	// Step 3: Test for symmetric NAT by checking if port changes per destination
 	isSymmetric, err := d.testSymmetricNAT(serverAddr)
 	if err != nil {
 		log.Printf("Failed to test for symmetric NAT: %v", err)
 		// Continue with other tests
 	} else if isSymmetric {
-		log.Println("Detected Symmetric NAT")
+		log.Println("Detected Symmetric NAT (local test)")
 		return NATSymmetric, nil
 	}
 
-	// Step 3: If not symmetric, it's some type of cone NAT
+	// Step 4: If not symmetric, it's some type of cone NAT
 	// Without external STUN servers, we'll default to Port-Restricted Cone
 	// which is the most common type and a safe middle ground
 	log.Println("Detected Cone NAT (likely Port-Restricted)")
 	return NATPortRestrictedCone, nil
+}
+
+// detectWithSTUN performs NAT detection using STUN protocol
+func (d *Detector) detectWithSTUN(serverAddr string) (NATType, error) {
+	// Try multiple STUN servers for better reliability
+	stunServers := []string{
+		serverAddr,
+		"stun.l.google.com:19302",
+		"stun1.l.google.com:19302",
+		"stun2.l.google.com:19302",
+	}
+
+	var lastErr error
+	for _, server := range stunServers {
+		client := NewSTUNClient(server, d.testTimeout)
+		natType, err := client.DetectNATTypeWithSTUN()
+		if err == nil {
+			log.Printf("Successfully detected NAT type using STUN server %s: %s", server, natType)
+			return natType, nil
+		}
+		lastErr = err
+		log.Printf("STUN detection failed with server %s: %v", server, err)
+	}
+
+	return NATUnknown, fmt.Errorf("all STUN servers failed, last error: %v", lastErr)
 }
 
 // hasPublicIP checks if the local address is a public IP
@@ -243,8 +276,8 @@ func (d *Detector) testSymmetricNAT(serverAddr string) (bool, error) {
 	testConn, err := net.ListenUDP("udp4", testAddr)
 	if err != nil {
 		// If we can't bind to the same port, might indicate symmetric behavior
-		// but could also be port already in use
-		return false, nil // Conservative: assume non-symmetric
+		// This suggests the NAT is holding the port mapping exclusively
+		return true, nil // Likely symmetric
 	}
 	testConn.Close()
 
