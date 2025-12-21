@@ -113,6 +113,13 @@ type clientRoute struct {
 	client  *ClientConnection
 }
 
+// clientInfo is a helper type for broadcasting peer info
+type clientInfo struct {
+	client       *ClientConnection
+	clientIP     net.IP
+	lastPeerInfo string
+}
+
 func (c *ClientConnection) setCipherWithGen(cipher *crypto.Cipher, gen uint64) {
 	c.mu.Lock()
 	c.cipher = cipher
@@ -172,6 +179,12 @@ type Tunnel struct {
 	routeMux         sync.RWMutex
 	advertisedRoutes []clientRoute
 	clientRoutes     map[*ClientConnection][]string
+
+	// Broadcast throttling (NEW)
+	lastBroadcastTime map[string]time.Time // Tracks last broadcast time per client IP
+	broadcastMux      sync.Mutex           // Protects lastBroadcastTime
+	peerInfoCache     map[string]string    // Caches last sent peer info per client IP
+	peerCacheMux      sync.RWMutex         // Protects peerInfoCache
 }
 
 // prependPacketType adds a leading packet type byte to the payload.
@@ -314,16 +327,18 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	}
 
 	t := &Tunnel{
-		config:         cfg,
-		configFilePath: configFilePath,
-		fec:            fecCodec,
-		cipher:         cipher,
-		stopCh:         make(chan struct{}),
-		myTunnelIP:     myIP,
-		packetBufSize:  packetBufSize,
-		clientRoutes:   make(map[*ClientConnection][]string),
-		allClients:     make(map[*ClientConnection]struct{}),
-		xdpAccel:       accel,
+		config:            cfg,
+		configFilePath:    configFilePath,
+		fec:               fecCodec,
+		cipher:            cipher,
+		stopCh:            make(chan struct{}),
+		myTunnelIP:        myIP,
+		packetBufSize:     packetBufSize,
+		clientRoutes:      make(map[*ClientConnection][]string),
+		allClients:        make(map[*ClientConnection]struct{}),
+		xdpAccel:          accel,
+		lastBroadcastTime: make(map[string]time.Time),
+		peerInfoCache:     make(map[string]string),
 	}
 	t.packetPool = &sync.Pool{
 		New: func() any {
@@ -338,6 +353,9 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	// Initialize P2P manager if enabled
 	if cfg.P2PEnabled && cfg.Mode == "client" {
 		t.p2pManager = p2p.NewManager(cfg.P2PPort)
+		// Set configurable keepalive interval (defaults to 25 seconds for reduced network traffic)
+		keepaliveInterval := time.Duration(cfg.P2PKeepaliveInterval) * time.Second
+		t.p2pManager.SetKeepaliveInterval(keepaliveInterval)
 		t.routingTable = routing.NewRoutingTable(cfg.MaxHops)
 	}
 
@@ -2098,8 +2116,10 @@ func (t *Tunnel) routeAdvertLoop() {
 	// Send immediately once connected
 	t.sendRoutesToServer()
 
-	interval := DefaultRouteAdvertInterval
+	// Use RouteAdvertInterval from config, which defaults to 300 seconds (5 minutes)
+	interval := time.Duration(t.config.RouteAdvertInterval) * time.Second
 	if t.config.RouteUpdateInterval > 0 {
+		// RouteUpdateInterval overrides if set (for backward compatibility)
 		interval = time.Duration(t.config.RouteUpdateInterval) * time.Second
 	}
 
@@ -2940,9 +2960,46 @@ func generateRandomKey() (string, error) {
 }
 
 // broadcastPeerInfo broadcasts peer information to all connected clients (server mode)
+// with throttling and incremental update support
 func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 	if !t.config.P2PEnabled {
 		return
+	}
+
+	newClientIPStr := newClientIP.String()
+
+	// Check if we should throttle this broadcast
+	if t.config.EnableIncrementalUpdate {
+		t.broadcastMux.Lock()
+		lastTime, exists := t.lastBroadcastTime[newClientIPStr]
+		if exists {
+			elapsed := time.Since(lastTime)
+			throttleDuration := time.Duration(t.config.BroadcastThrottleMs) * time.Millisecond
+			if elapsed < throttleDuration {
+				t.broadcastMux.Unlock()
+				log.Printf("Throttling broadcast for %s (last broadcast %v ago, minimum %v)",
+					newClientIPStr, elapsed, throttleDuration)
+				return
+			}
+		}
+		t.lastBroadcastTime[newClientIPStr] = time.Now()
+		t.broadcastMux.Unlock()
+
+		// Check if peer info has changed
+		t.peerCacheMux.RLock()
+		cachedInfo, cached := t.peerInfoCache[newClientIPStr]
+		t.peerCacheMux.RUnlock()
+
+		if cached && cachedInfo == peerInfo {
+			// No change, skip broadcast
+			log.Printf("Skipping broadcast for %s - peer info unchanged", newClientIPStr)
+			return
+		}
+
+		// Update cache
+		t.peerCacheMux.Lock()
+		t.peerInfoCache[newClientIPStr] = peerInfo
+		t.peerCacheMux.Unlock()
 	}
 
 	// Create peer info packet
@@ -2956,12 +3013,6 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 	copy(punchPacket[1:], []byte(peerInfo))
 
 	// Snapshot clients and their peer info to avoid holding lock during network IO
-	type clientInfo struct {
-		client       *ClientConnection
-		clientIP     net.IP
-		lastPeerInfo string
-	}
-
 	t.clientsMux.RLock()
 	clients := make([]clientInfo, 0, len(t.clients))
 	var newClient *ClientConnection
@@ -2983,6 +3034,31 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 	}
 	t.clientsMux.RUnlock()
 
+	// Limit batch size to prevent overwhelming the network
+	batchSize := t.config.MaxPeerInfoBatchSize
+	if len(clients) > batchSize {
+		log.Printf("⚠️  Batching broadcast: %d clients, limiting to %d per batch", len(clients), batchSize)
+		// Send to first batch immediately, schedule rest
+		t.sendPeerInfoBatch(clients[:batchSize], fullPacket, punchPacket, newClientIP, newClient)
+		
+		// Schedule remaining batches with delays
+		go func() {
+			for i := batchSize; i < len(clients); i += batchSize {
+				end := i + batchSize
+				if end > len(clients) {
+					end = len(clients)
+				}
+				time.Sleep(100 * time.Millisecond) // Small delay between batches
+				t.sendPeerInfoBatch(clients[i:end], fullPacket, punchPacket, newClientIP, newClient)
+			}
+		}()
+	} else {
+		t.sendPeerInfoBatch(clients, fullPacket, punchPacket, newClientIP, newClient)
+	}
+}
+
+// sendPeerInfoBatch sends peer info to a batch of clients
+func (t *Tunnel) sendPeerInfoBatch(clients []clientInfo, fullPacket, punchPacket []byte, newClientIP net.IP, newClient *ClientConnection) {
 	// Perform network I/O without holding the lock
 	for _, info := range clients {
 		// Send peer info to existing client
@@ -3028,3 +3104,4 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 		}
 	}
 }
+

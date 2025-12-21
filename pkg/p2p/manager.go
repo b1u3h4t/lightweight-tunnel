@@ -72,29 +72,36 @@ type Connection struct {
 
 // Manager manages P2P connections
 type Manager struct {
-	localPort   int
-	connections map[string]*Connection // Key: peer tunnel IP string
-	listener    *net.UDPConn
-	peers       map[string]*PeerInfo // Peer information
-	mu          sync.RWMutex
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
-	onPacket    func(peerIP net.IP, data []byte) // Callback for received packets
-	natDetector *nat.Detector // NAT type detector
-	myNATType   nat.NATType   // My NAT type
-	natTypeMux  sync.RWMutex  // Protects myNATType
+	localPort           int
+	connections         map[string]*Connection // Key: peer tunnel IP string
+	listener            *net.UDPConn
+	peers               map[string]*PeerInfo // Peer information
+	mu                  sync.RWMutex
+	stopCh              chan struct{}
+	wg                  sync.WaitGroup
+	onPacket            func(peerIP net.IP, data []byte) // Callback for received packets
+	natDetector         *nat.Detector // NAT type detector
+	myNATType           nat.NATType   // My NAT type
+	natTypeMux          sync.RWMutex  // Protects myNATType
+	keepaliveInterval   time.Duration // Configurable keepalive interval
 }
 
 // NewManager creates a new P2P connection manager
 func NewManager(port int) *Manager {
 	return &Manager{
-		localPort:   port,
-		connections: make(map[string]*Connection),
-		peers:       make(map[string]*PeerInfo),
-		stopCh:      make(chan struct{}),
-		natDetector: nat.NewDetector(port, 5*time.Second),
-		myNATType:   nat.NATUnknown,
+		localPort:         port,
+		connections:       make(map[string]*Connection),
+		peers:             make(map[string]*PeerInfo),
+		stopCh:            make(chan struct{}),
+		natDetector:       nat.NewDetector(port, 5*time.Second),
+		myNATType:         nat.NATUnknown,
+		keepaliveInterval: KeepaliveInterval, // Default to 15 seconds
 	}
+}
+
+// SetKeepaliveInterval sets the keepalive interval for P2P connections
+func (m *Manager) SetKeepaliveInterval(interval time.Duration) {
+	m.keepaliveInterval = interval
 }
 
 // Start starts the P2P manager
@@ -934,7 +941,7 @@ func (m *Manager) connectWithPortPrediction(peer *PeerInfo, peerTunnelIP net.IP)
 func (m *Manager) keepaliveLoop() {
 	defer m.wg.Done()
 	
-	ticker := time.NewTicker(KeepaliveInterval)
+	ticker := time.NewTicker(m.keepaliveInterval)
 	defer ticker.Stop()
 	
 	for {
@@ -997,7 +1004,7 @@ func (m *Manager) sendKeepalives() {
 			if backoffMultiplier > MaxBackoffMultiplier {
 				backoffMultiplier = MaxBackoffMultiplier
 			}
-			nextAttemptDelay := KeepaliveInterval * time.Duration(backoffMultiplier)
+			nextAttemptDelay := m.keepaliveInterval * time.Duration(backoffMultiplier)
 			conn.nextHandshakeAttemptAt = now.Add(nextAttemptDelay)
 			conn.mu.Unlock()
 			

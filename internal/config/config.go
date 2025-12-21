@@ -39,6 +39,13 @@ type Config struct {
 	EnableNATDetection  bool `json:"enable_nat_detection"`  // Enable automatic NAT type detection (default true)
 	EnableXDP           bool `json:"enable_xdp"`            // Enable lightweight XDP/eBPF fast-path classification
 	EnableKernelTune    bool `json:"enable_kernel_tune"`    // Apply kernel tunings (TFO/BBR2) on startup
+
+	// Broadcast optimization configuration (NEW)
+	BroadcastThrottleMs     int  `json:"broadcast_throttle_ms"`     // Minimum interval between broadcasts per client in ms (default 1000)
+	RouteAdvertInterval     int  `json:"route_advert_interval"`     // Route advertisement interval in seconds (default 300)
+	P2PKeepaliveInterval    int  `json:"p2p_keepalive_interval"`    // P2P keepalive interval in seconds (default 25)
+	EnableIncrementalUpdate bool `json:"enable_incremental_update"` // Send only changed peer info instead of full broadcasts (default true)
+	MaxPeerInfoBatchSize    int  `json:"max_peer_info_batch_size"`  // Maximum number of peer info updates in a batch (default 10)
 }
 
 // DefaultConfig returns a default configuration
@@ -67,10 +74,15 @@ func DefaultConfig() *Config {
 		EnableMeshRouting:   true,
 		MaxHops:             3,
 		RouteUpdateInterval: 30,
-		P2PTimeout:          5,
-		EnableNATDetection:  true,
-		EnableXDP:           true,
-		EnableKernelTune:    true,
+		P2PTimeout:              5,
+		EnableNATDetection:      true,
+		EnableXDP:               true,
+		EnableKernelTune:        true,
+		BroadcastThrottleMs:     1000,  // 1 second minimum between broadcasts per client
+		RouteAdvertInterval:     300,   // 5 minutes instead of 60 seconds
+		P2PKeepaliveInterval:    25,    // 25 seconds instead of 15 seconds
+		EnableIncrementalUpdate: true,  // Only broadcast changes
+		MaxPeerInfoBatchSize:    10,    // Batch up to 10 updates
 	}
 }
 
@@ -126,6 +138,18 @@ func LoadConfig(filename string) (*Config, error) {
 	if config.P2PTimeout == 0 {
 		config.P2PTimeout = 5
 	}
+	if config.BroadcastThrottleMs == 0 {
+		config.BroadcastThrottleMs = 1000
+	}
+	if config.RouteAdvertInterval == 0 {
+		config.RouteAdvertInterval = 300
+	}
+	if config.P2PKeepaliveInterval == 0 {
+		config.P2PKeepaliveInterval = 25
+	}
+	if config.MaxPeerInfoBatchSize == 0 {
+		config.MaxPeerInfoBatchSize = 10
+	}
 
 	// Default multi_client to true for server mode if not explicitly set
 	// This matches the command-line default and expected behavior
@@ -150,6 +174,9 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if _, exists := rawConfig["enable_kernel_tune"]; !exists {
 		config.EnableKernelTune = true
+	}
+	if _, exists := rawConfig["enable_incremental_update"]; !exists {
+		config.EnableIncrementalUpdate = true
 	}
 
 	return &config, nil
