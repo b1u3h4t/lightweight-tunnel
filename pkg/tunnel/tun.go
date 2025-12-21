@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -82,6 +83,10 @@ func (t *TunDevice) Read(buf []byte) (int, error) {
 	
 	for {
 		n, err := syscall.Read(t.fd, buf)
+		if err == nil {
+			return n, nil
+		}
+		
 		if err == syscall.EINTR {
 			// Check again if device was closed while we were interrupted
 			if atomic.LoadInt32(&t.closed) != 0 {
@@ -89,15 +94,21 @@ func (t *TunDevice) Read(buf []byte) (int, error) {
 			}
 			continue
 		}
+		
 		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-			// Non-blocking read would block, check if closed and retry with a small sleep
+			// Non-blocking read would block, check if closed and wait briefly
 			if atomic.LoadInt32(&t.closed) != 0 {
 				return 0, syscall.EBADF
 			}
-			// Sleep briefly to avoid busy-wait
-			syscall.Select(0, nil, nil, nil, &syscall.Timeval{Usec: 10000}) // 10ms
+			// Use a short sleep to avoid busy-waiting while still being responsive
+			time.Sleep(10 * time.Millisecond)
+			// Check again after sleep
+			if atomic.LoadInt32(&t.closed) != 0 {
+				return 0, syscall.EBADF
+			}
 			continue
 		}
+		
 		return n, err
 	}
 }
@@ -111,6 +122,10 @@ func (t *TunDevice) Write(buf []byte) (int, error) {
 	
 	for {
 		n, err := syscall.Write(t.fd, buf)
+		if err == nil {
+			return n, nil
+		}
+		
 		if err == syscall.EINTR {
 			// Check again if device was closed while we were interrupted
 			if atomic.LoadInt32(&t.closed) != 0 {
@@ -118,15 +133,21 @@ func (t *TunDevice) Write(buf []byte) (int, error) {
 			}
 			continue
 		}
+		
 		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-			// Non-blocking write would block, check if closed and retry with a small sleep
+			// Non-blocking write would block, check if closed and wait briefly
 			if atomic.LoadInt32(&t.closed) != 0 {
 				return 0, syscall.EBADF
 			}
-			// Sleep briefly to avoid busy-wait
-			syscall.Select(0, nil, nil, nil, &syscall.Timeval{Usec: 10000}) // 10ms
+			// Use a short sleep to avoid busy-waiting while still being responsive
+			time.Sleep(10 * time.Millisecond)
+			// Check again after sleep
+			if atomic.LoadInt32(&t.closed) != 0 {
+				return 0, syscall.EBADF
+			}
 			continue
 		}
+		
 		return n, err
 	}
 }
