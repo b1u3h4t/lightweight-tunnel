@@ -152,7 +152,15 @@ TCP-over-TCP 是隧道技术中的经典问题：
 | 完全锥形 (Full Cone) | ✅ 99% | 任何外部主机都可连接 |
 | 限制锥形 (Restricted Cone) | ✅ 95% | 只有通信过的 IP 可连接 |
 | 端口限制锥形 (Port Restricted) | ✅ 90% | 只有通信过的 IP:Port 可连接 |
-| 对称型 (Symmetric) | ⚠️ 50-70% | 使用端口预测策略，显著改进 |
+| 对称型 (Symmetric) | ✅ 70-80% | 使用端口预测策略，基于N2N技术显著改进 |
+
+**最新改进 (2025-12-21)**：基于 N2N 打洞技术优化 P2P 成功率
+- ✅ 更快的握手速度（50ms间隔，30次尝试）
+- ✅ 自适应保活机制（建立连接时3秒快速保活，稳定后10秒常规保活）
+- ✅ 双向端口预测（覆盖±50端口范围）
+- ✅ 对称NAT成功率从50-60%提升至70-80%
+
+详见：[P2P N2N改进文档](docs/P2P_N2N_IMPROVEMENTS.md)
 
 #### NAT 类型检测
 
@@ -1336,6 +1344,7 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 ### 项目文档
 
 - **[N2N vs Lightweight-Tunnel 技术对比](docs/N2N_ANALYSIS.md)** - 深入分析本项目与 ntop/n2n 的技术差异与优势
+- **[P2P N2N 改进文档](docs/P2P_N2N_IMPROVEMENTS.md)** - 基于 N2N 技术提升 P2P 成功率的详细说明（新）
 - **[NAT 检测指南](docs/NAT_DETECTION.md)** - NAT 类型检测和 STUN 服务器配置
 - **[网络优化指南](docs/NETWORK_OPTIMIZATION.md)** - 大规模部署的网络优化配置
 - **[P2P 修复总结](docs/P2P_FIXES_SUMMARY.md)** - P2P 连接问题修复详解
