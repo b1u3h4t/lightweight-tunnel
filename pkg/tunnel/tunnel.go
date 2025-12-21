@@ -35,6 +35,7 @@ const (
 	PacketTypePublicAddr   = 0x05 // Server tells client its public address
 	PacketTypePunch        = 0x06 // Server requests simultaneous hole-punch
 	PacketTypeConfigUpdate = 0x07 // Server pushes new config (e.g., rotated key)
+	PacketTypeP2PRequest   = 0x08 // Client requests P2P connection to another client
 
 	// IPv4 constants
 	IPv4Version      = 4
@@ -180,11 +181,9 @@ type Tunnel struct {
 	advertisedRoutes []clientRoute
 	clientRoutes     map[*ClientConnection][]string
 
-	// Broadcast throttling (NEW)
-	lastBroadcastTime map[string]time.Time // Tracks last broadcast time per client IP
-	broadcastMux      sync.Mutex           // Protects lastBroadcastTime
-	peerInfoCache     map[string]string    // Caches last sent peer info per client IP
-	peerCacheMux      sync.RWMutex         // Protects peerInfoCache
+	// On-demand P2P state tracking
+	pendingP2PRequests map[string]time.Time // Tracks pending P2P requests (key: target client IP)
+	p2pRequestMux      sync.Mutex           // Protects pendingP2PRequests
 }
 
 // prependPacketType adds a leading packet type byte to the payload.
@@ -327,18 +326,17 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	}
 
 	t := &Tunnel{
-		config:            cfg,
-		configFilePath:    configFilePath,
-		fec:               fecCodec,
-		cipher:            cipher,
-		stopCh:            make(chan struct{}),
-		myTunnelIP:        myIP,
-		packetBufSize:     packetBufSize,
-		clientRoutes:      make(map[*ClientConnection][]string),
-		allClients:        make(map[*ClientConnection]struct{}),
-		xdpAccel:          accel,
-		lastBroadcastTime: make(map[string]time.Time),
-		peerInfoCache:     make(map[string]string),
+		config:             cfg,
+		configFilePath:     configFilePath,
+		fec:                fecCodec,
+		cipher:             cipher,
+		stopCh:             make(chan struct{}),
+		myTunnelIP:         myIP,
+		packetBufSize:      packetBufSize,
+		clientRoutes:       make(map[*ClientConnection][]string),
+		allClients:         make(map[*ClientConnection]struct{}),
+		xdpAccel:           accel,
+		pendingP2PRequests: make(map[string]time.Time),
 	}
 	t.packetPool = &sync.Pool{
 		New: func() any {
@@ -1267,31 +1265,9 @@ func (t *Tunnel) netReader() {
 				}()
 			}
 
-			// Now announce P2P info with the correct public address
-			if t.p2pManager != nil {
-				// Wait a bit for NAT detection to complete before announcing
-				time.Sleep(500 * time.Millisecond)
-
-				// Retry announcement with exponential backoff if it fails
-				go func() {
-					retries := 0
-					for retries < P2PMaxRetries {
-						if err := t.announcePeerInfo(); err != nil {
-							log.Printf("Failed to announce P2P info (attempt %d/%d): %v", retries+1, P2PMaxRetries, err)
-							retries++
-							// Exponential backoff with cap
-							backoffSeconds := 1 << uint(retries)
-							if backoffSeconds > P2PMaxBackoffSeconds {
-								backoffSeconds = P2PMaxBackoffSeconds
-							}
-							time.Sleep(time.Duration(backoffSeconds) * time.Second)
-						} else {
-							log.Printf("Successfully announced P2P info")
-							break
-						}
-					}
-				}()
-			}
+			// On-demand P2P: Do NOT automatically announce peer info
+			// P2P connections will be established on-demand when clients need to communicate
+			log.Printf("On-demand P2P mode: peer info will be announced only when needed")
 		case PacketTypePeerInfo:
 			// Received peer info from server about another client
 			if t.config.P2PEnabled && t.p2pManager != nil {
@@ -1597,10 +1573,10 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 		case PacketTypeKeepalive:
 			// Keepalive received, no action needed
 		case PacketTypePeerInfo:
-			// Handle peer info from client (server mode)
+			// Handle peer info from client (server mode) - store but don't broadcast
 			if t.config.P2PEnabled {
 				peerInfoStr := string(payload)
-				log.Printf("Received peer info from client: %s", peerInfoStr)
+				log.Printf("Received and stored peer info from client: %s", peerInfoStr)
 
 				// Parse peer info to get tunnel IP
 				parts := strings.Split(peerInfoStr, "|")
@@ -1612,15 +1588,18 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 							t.addClient(client, tunnelIP)
 						}
 
-						// Broadcast this peer info to all other clients
-						// Save peerInfo on the client for later punch coordination (protected)
+						// Store peer info for on-demand P2P connection establishment
+						// No automatic broadcast - connections established only when needed
 						client.mu.Lock()
 						client.lastPeerInfo = peerInfoStr
 						client.mu.Unlock()
-						t.broadcastPeerInfo(tunnelIP, peerInfoStr)
+						log.Printf("Stored peer info for %s, ready for on-demand P2P", tunnelIP)
 					}
 				}
 			}
+		case PacketTypeP2PRequest:
+			// Handle P2P connection request from client (server mode)
+			t.handleP2PRequest(client, payload)
 		case PacketTypeRouteInfo:
 			// Register routes advertised by client and respond with server routes
 			routes := parseRouteList(string(payload))
@@ -2337,50 +2316,93 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) (bool, error) {
 
 	dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
 
-	// Get best route
-	if t.routingTable != nil {
-		route := t.routingTable.GetRoute(dstIP)
-		if route != nil {
-			switch route.Type {
-			case routing.RouteDirect:
-				// Send via P2P
-				if t.p2pManager != nil && t.p2pManager.IsConnected(dstIP) {
-					fullPacket := make([]byte, len(packet)+1)
-					fullPacket[0] = PacketTypeData
-					copy(fullPacket[1:], packet)
+	// On-demand P2P: Check if we have a P2P connection
+	if t.p2pManager != nil && t.p2pManager.IsConnected(dstIP) {
+		// Direct P2P connection exists, use it
+		fullPacket := make([]byte, len(packet)+1)
+		fullPacket[0] = PacketTypeData
+		copy(fullPacket[1:], packet)
 
-					// Encrypt the packet before sending via P2P
-					encryptedPacket, err := t.encryptPacket(fullPacket)
-					if err != nil {
-						log.Printf("P2P encryption error: %v", err)
-						// Mark peer as going through server on encryption failure
-						t.markPeerFallbackToServer(dstIP)
-						return t.sendViaServer(packet)
-					}
+		// Encrypt the packet before sending via P2P
+		encryptedPacket, err := t.encryptPacket(fullPacket)
+		if err != nil {
+			log.Printf("P2P encryption error: %v", err)
+			return t.sendViaServer(packet)
+		}
 
-					if err := t.p2pManager.SendPacket(dstIP, encryptedPacket); err != nil {
-						log.Printf("P2P send failed to %s, falling back to server: %v", dstIP, err)
-						// Mark peer as going through server on send failure
-						t.markPeerFallbackToServer(dstIP)
-						// Fall back to server
-						return t.sendViaServer(packet)
-					}
-					return false, nil
-				}
-				// P2P not connected despite direct route - update peer state
-				t.markPeerFallbackToServer(dstIP)
-				return t.sendViaServer(packet)
-			case routing.RouteRelay:
-				// Send via relay peer
-				// For now, fall back to server (relay implementation can be added later)
-				log.Printf("Relay routing not yet implemented, using server for %s", dstIP)
-				return t.sendViaServer(packet)
-			}
+		if err := t.p2pManager.SendPacket(dstIP, encryptedPacket); err != nil {
+			log.Printf("P2P send failed to %s, falling back to server: %v", dstIP, err)
+			return t.sendViaServer(packet)
+		}
+		return false, nil
+	}
+
+	// No P2P connection - try to establish one on-demand
+	if t.config.P2PEnabled && t.p2pManager != nil {
+		// Check if we should request P2P connection
+		if t.shouldRequestP2P(dstIP) {
+			// Send P2P request to server
+			t.requestP2PConnection(dstIP)
 		}
 	}
 
-	// Default: send via server
+	// For now, send via server (P2P will be established for future packets)
 	return t.sendViaServer(packet)
+}
+
+// shouldRequestP2P checks if we should request a P2P connection to the target IP
+// Returns false if a request is already pending or was recently made
+func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
+	targetIPStr := targetIP.String()
+	
+	t.p2pRequestMux.Lock()
+	defer t.p2pRequestMux.Unlock()
+	
+	// Check if request already pending
+	if lastReq, exists := t.pendingP2PRequests[targetIPStr]; exists {
+		// Don't request again if less than 5 seconds since last request
+		if time.Since(lastReq) < 5*time.Second {
+			return false
+		}
+	}
+	
+	return true
+}
+
+// requestP2PConnection sends a P2P connection request to the server
+func (t *Tunnel) requestP2PConnection(targetIP net.IP) {
+	targetIPStr := targetIP.String()
+	
+	// Mark as pending
+	t.p2pRequestMux.Lock()
+	t.pendingP2PRequests[targetIPStr] = time.Now()
+	t.p2pRequestMux.Unlock()
+	
+	// Build request message: format is just the target tunnel IP
+	payload := []byte(targetIPStr)
+	fullPacket := make([]byte, len(payload)+1)
+	fullPacket[0] = PacketTypeP2PRequest
+	copy(fullPacket[1:], payload)
+	
+	// Encrypt and send
+	encryptedPacket, err := t.encryptPacket(fullPacket)
+	if err != nil {
+		log.Printf("Failed to encrypt P2P request: %v", err)
+		return
+	}
+	
+	// Send to server
+	t.connMux.Lock()
+	conn := t.conn
+	t.connMux.Unlock()
+	
+	if conn != nil {
+		if err := conn.WritePacket(encryptedPacket); err != nil {
+			log.Printf("Failed to send P2P request to server: %v", err)
+		} else {
+			log.Printf("Sent P2P connection request for %s to server", targetIPStr)
+		}
+	}
 }
 
 // sendViaServer sends packet through the server connection
@@ -2959,154 +2981,151 @@ func generateRandomKey() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// broadcastPeerInfo broadcasts peer information to all connected clients (server mode)
-// with throttling and incremental update support
-func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
+// handleP2PRequest handles on-demand P2P connection requests from clients (server mode)
+func (t *Tunnel) handleP2PRequest(requestingClient *ClientConnection, payload []byte) {
 	if !t.config.P2PEnabled {
 		return
 	}
-
-	newClientIPStr := newClientIP.String()
-
-	// Check if we should throttle this broadcast
-	if t.config.EnableIncrementalUpdate {
-		t.broadcastMux.Lock()
-		lastTime, exists := t.lastBroadcastTime[newClientIPStr]
-		if exists {
-			elapsed := time.Since(lastTime)
-			throttleDuration := time.Duration(t.config.BroadcastThrottleMs) * time.Millisecond
-			if elapsed < throttleDuration {
-				t.broadcastMux.Unlock()
-				// Only log throttling occasionally to prevent log spam
-				if elapsed < throttleDuration/2 {
-					log.Printf("Throttling broadcast for %s (last broadcast %v ago, minimum %v)",
-						newClientIPStr, elapsed, throttleDuration)
-				}
-				return
-			}
-		}
-		t.lastBroadcastTime[newClientIPStr] = time.Now()
-		t.broadcastMux.Unlock()
-
-		// Check if peer info has changed
-		t.peerCacheMux.RLock()
-		cachedInfo, cached := t.peerInfoCache[newClientIPStr]
-		t.peerCacheMux.RUnlock()
-
-		if cached && cachedInfo == peerInfo {
-			// No change, skip broadcast (log only occasionally to prevent spam)
-			return
-		}
-
-		// Update cache
-		t.peerCacheMux.Lock()
-		t.peerInfoCache[newClientIPStr] = peerInfo
-		t.peerCacheMux.Unlock()
+	
+	// Parse target IP from request
+	targetIPStr := string(payload)
+	targetIP := net.ParseIP(targetIPStr)
+	if targetIP == nil {
+		log.Printf("Invalid P2P request: bad target IP %s", targetIPStr)
+		return
 	}
+	
+	// Get requesting client's IP
+	requestingClient.mu.RLock()
+	requestingIP := requestingClient.clientIP
+	requestingPeerInfo := requestingClient.lastPeerInfo
+	requestingClient.mu.RUnlock()
+	
+	if requestingIP == nil {
+		log.Printf("P2P request from unregistered client, ignoring")
+		return
+	}
+	
+	// Find target client
+	targetClient := t.getClientByIP(targetIP)
+	if targetClient == nil {
+		log.Printf("P2P request for unknown target %s, ignoring", targetIPStr)
+		return
+	}
+	
+	// Get target client's peer info
+	targetClient.mu.RLock()
+	targetPeerInfo := targetClient.lastPeerInfo
+	targetClient.mu.RUnlock()
+	
+	if requestingPeerInfo == "" || targetPeerInfo == "" {
+		log.Printf("P2P request but peer info not available (requesting=%v, target=%v)",
+			requestingPeerInfo == "", targetPeerInfo == "")
+		return
+	}
+	
+	log.Printf("Processing P2P request: %s wants to connect to %s", requestingIP, targetIP)
+	
+	// Parse NAT types from peer info
+	requestingNAT := t.parseNATTypeFromPeerInfo(requestingPeerInfo)
+	targetNAT := t.parseNATTypeFromPeerInfo(targetPeerInfo)
+	
+	// Determine who should initiate connection based on NAT levels
+	var initiator, responder *ClientConnection
+	var initiatorPeerInfo, responderPeerInfo string
+	
+	if requestingNAT.GetLevel() > targetNAT.GetLevel() {
+		// Requesting client has worse NAT, it should initiate
+		initiator = requestingClient
+		responder = targetClient
+		initiatorPeerInfo = targetPeerInfo
+		responderPeerInfo = requestingPeerInfo
+		log.Printf("NAT-based decision: %s (NAT level %d) will initiate to %s (NAT level %d)",
+			requestingIP, requestingNAT.GetLevel(), targetIP, targetNAT.GetLevel())
+	} else if requestingNAT.GetLevel() < targetNAT.GetLevel() {
+		// Target has worse NAT, it should initiate
+		initiator = targetClient
+		responder = requestingClient
+		initiatorPeerInfo = requestingPeerInfo
+		responderPeerInfo = targetPeerInfo
+		log.Printf("NAT-based decision: %s (NAT level %d) will initiate to %s (NAT level %d)",
+			targetIP, targetNAT.GetLevel(), requestingIP, requestingNAT.GetLevel())
+	} else {
+		// Same NAT level, requesting client tries first
+		initiator = requestingClient
+		responder = targetClient
+		initiatorPeerInfo = targetPeerInfo
+		responderPeerInfo = requestingPeerInfo
+		log.Printf("Same NAT level: %s (requester) will try first, then %s if it fails",
+			requestingIP, targetIP)
+	}
+	
+	// Send peer info and PUNCH to initiator
+	t.sendPeerInfoAndPunch(initiator, initiatorPeerInfo)
+	
+	// Also send to responder so it's ready to respond
+	t.sendPeerInfoAndPunch(responder, responderPeerInfo)
+	
+	log.Printf("P2P coordination complete for %s <-> %s", requestingIP, targetIP)
+}
 
-	// Create peer info packet
-	fullPacket := make([]byte, len(peerInfo)+1)
-	fullPacket[0] = PacketTypePeerInfo
-	copy(fullPacket[1:], []byte(peerInfo))
+// parseNATTypeFromPeerInfo extracts NAT type from peer info string
+func (t *Tunnel) parseNATTypeFromPeerInfo(peerInfo string) nat.NATType {
+	// Format: TunnelIP|PublicAddr|LocalAddr|NATType (NAT type is optional)
+	parts := strings.Split(peerInfo, "|")
+	if len(parts) >= 4 {
+		// Try to parse NAT type
+		switch parts[3] {
+		case "None (Public IP)":
+			return nat.NATNone
+		case "Full Cone":
+			return nat.NATFullCone
+		case "Restricted Cone":
+			return nat.NATRestrictedCone
+		case "Port-Restricted Cone":
+			return nat.NATPortRestrictedCone
+		case "Symmetric":
+			return nat.NATSymmetric
+		}
+	}
+	// Default to unknown if not specified
+	return nat.NATUnknown
+}
 
-	// Create PUNCH packet
+// sendPeerInfoAndPunch sends peer info and punch request to a client
+func (t *Tunnel) sendPeerInfoAndPunch(client *ClientConnection, peerInfo string) {
+	// Send peer info
+	peerInfoPacket := make([]byte, len(peerInfo)+1)
+	peerInfoPacket[0] = PacketTypePeerInfo
+	copy(peerInfoPacket[1:], []byte(peerInfo))
+	
+	encryptedPeerInfo, err := t.encryptForClient(client, peerInfoPacket)
+	if err != nil {
+		log.Printf("Failed to encrypt peer info: %v", err)
+		return
+	}
+	
+	if err := client.conn.WritePacket(encryptedPeerInfo); err != nil {
+		log.Printf("Failed to send peer info: %v", err)
+		return
+	}
+	
+	// Send PUNCH command
 	punchPacket := make([]byte, len(peerInfo)+1)
 	punchPacket[0] = PacketTypePunch
 	copy(punchPacket[1:], []byte(peerInfo))
-
-	// Snapshot clients and their peer info to avoid holding lock during network IO
-	t.clientsMux.RLock()
-	clients := make([]clientInfo, 0, len(t.clients))
-	var newClient *ClientConnection
-	for _, client := range t.clients {
-		if client.clientIP != nil {
-			if client.clientIP.Equal(newClientIP) {
-				newClient = client
-			} else {
-				client.mu.RLock()
-				info := clientInfo{
-					client:       client,
-					clientIP:     client.clientIP,
-					lastPeerInfo: client.lastPeerInfo,
-				}
-				client.mu.RUnlock()
-				clients = append(clients, info)
-			}
-		}
-	}
-	t.clientsMux.RUnlock()
-
-	// Limit batch size to prevent overwhelming the network
-	batchSize := t.config.MaxPeerInfoBatchSize
-	batchDelay := time.Duration(t.config.BroadcastBatchDelayMs) * time.Millisecond
 	
-	if len(clients) > batchSize {
-		log.Printf("⚠️  Batching broadcast: %d clients, limiting to %d per batch with %v delay", 
-			len(clients), batchSize, batchDelay)
-		// Send to first batch immediately, schedule rest
-		t.sendPeerInfoBatch(clients[:batchSize], fullPacket, punchPacket, newClientIP, newClient)
-		
-		// Schedule remaining batches with configurable delays
-		go func() {
-			for i := batchSize; i < len(clients); i += batchSize {
-				end := i + batchSize
-				if end > len(clients) {
-					end = len(clients)
-				}
-				time.Sleep(batchDelay)
-				t.sendPeerInfoBatch(clients[i:end], fullPacket, punchPacket, newClientIP, newClient)
-			}
-		}()
-	} else {
-		t.sendPeerInfoBatch(clients, fullPacket, punchPacket, newClientIP, newClient)
+	encryptedPunch, err := t.encryptForClient(client, punchPacket)
+	if err != nil {
+		log.Printf("Failed to encrypt punch packet: %v", err)
+		return
+	}
+	
+	if err := client.conn.WritePacket(encryptedPunch); err != nil {
+		log.Printf("Failed to send punch packet: %v", err)
 	}
 }
 
-// sendPeerInfoBatch sends peer info to a batch of clients
-func (t *Tunnel) sendPeerInfoBatch(clients []clientInfo, fullPacket, punchPacket []byte, newClientIP net.IP, newClient *ClientConnection) {
-	// Perform network I/O without holding the lock
-	for _, info := range clients {
-		// Send peer info to existing client
-		encryptedPacket, err := t.encryptForClient(info.client, fullPacket)
-		if err != nil {
-			log.Printf("Failed to encrypt peer info for broadcast: %v", err)
-			continue
-		}
-		if err := info.client.conn.WritePacket(encryptedPacket); err != nil {
-			log.Printf("Failed to broadcast peer info to %s: %v", info.clientIP, err)
-			info.client.stopOnce.Do(func() { close(info.client.stopCh) })
-			continue
-		}
-		log.Printf("Broadcasted peer info of %s to client %s", newClientIP, info.clientIP)
-
-		// Send PUNCH control to existing client so it will attempt punching to new client immediately
-		encryptedPunch, err := t.encryptForClient(info.client, punchPacket)
-		if err != nil {
-			log.Printf("Failed to encrypt PUNCH packet: %v", err)
-		} else {
-			if err := info.client.conn.WritePacket(encryptedPunch); err != nil {
-				log.Printf("Failed to send PUNCH to %s: %v", info.clientIP, err)
-			} else {
-				log.Printf("Sent PUNCH for %s to client %s", newClientIP, info.clientIP)
-			}
-		}
-
-		// Also send existing client's peerInfo as a PUNCH to the new client so new client will punch back
-		if info.lastPeerInfo != "" && newClient != nil {
-			punchBack := make([]byte, len(info.lastPeerInfo)+1)
-			punchBack[0] = PacketTypePunch
-			copy(punchBack[1:], []byte(info.lastPeerInfo))
-			encryptedPunchBack, err := t.encryptForClient(newClient, punchBack)
-			if err != nil {
-				log.Printf("Failed to encrypt PUNCH back packet: %v", err)
-			} else {
-				if err := newClient.conn.WritePacket(encryptedPunchBack); err != nil {
-					log.Printf("Failed to send PUNCH back to new client %s: %v", newClientIP, err)
-				} else {
-					log.Printf("Sent PUNCH (existing %s) to new client %s", info.clientIP, newClientIP)
-				}
-			}
-		}
-	}
-}
+// broadcastPeerInfo is no longer used in on-demand P2P mode
+// Connections are established only when needed via handleP2PRequest
 
