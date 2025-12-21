@@ -1055,6 +1055,8 @@ func (m *Manager) sendKeepalives() {
 					c.mu.Unlock()
 				}(conn)
 			}
+		}
+	}
 }
 
 // qualityMonitorLoop periodically checks connection quality and updates metrics
