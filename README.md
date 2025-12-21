@@ -18,6 +18,8 @@
 
 Lightweight Tunnel 是一个专业的内网穿透和虚拟组网工具，采用 Go 语言开发。项目的核心目标是提供**真正的 TCP 伪装能力**，通过 Raw Socket 技术构造完整的 TCP/IP 数据包，在保持高性能的同时，有效绕过防火墙和深度包检测（DPI）。
 
+> 💡 **与 N2N 的对比**: 本项目专注于 **TCP 伪装** 和 **弱网优化**（FEC），而 N2N 专注于 **Layer 2 虚拟网络** 和 **去中心化架构**。详见 [技术对比分析文档](docs/N2N_ANALYSIS.md)。
+
 ### 核心特点
 
 - 🔥 **真实 TCP 伪装**：使用 Raw Socket 技术，构造完整的 TCP/IP 数据包，实现协议层面的真实伪装
@@ -1112,9 +1114,11 @@ lightweight-tunnel/
 │       ├── mtu_discovery.go   # MTU 自动检测
 │       └── *_test.go          # 测试文件
 ├── docs/                       # 文档目录
-│   ├── N2N_ANALYSIS.md        # N2N 架构分析
+│   ├── N2N_ANALYSIS.md        # N2N vs 本项目技术对比分析
+│   ├── NAT_DETECTION.md       # NAT 检测指南
+│   ├── NETWORK_OPTIMIZATION.md # 网络优化指南
 │   ├── P2P_FIXES_SUMMARY.md   # P2P 修复总结
-│   └── P2P_OPTIMIZATION.md    # P2P 优化文档
+│   └── UPNP_SUPPORT.md        # UPnP 支持文档
 ├── Makefile                    # 构建脚本
 ├── go.mod                      # Go 模块定义
 ├── README.md                   # 本文档
@@ -1329,13 +1333,21 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
 ## 📚 参考资源
 
+### 项目文档
+
+- **[N2N vs Lightweight-Tunnel 技术对比](docs/N2N_ANALYSIS.md)** - 深入分析本项目与 ntop/n2n 的技术差异与优势
+- **[NAT 检测指南](docs/NAT_DETECTION.md)** - NAT 类型检测和 STUN 服务器配置
+- **[网络优化指南](docs/NETWORK_OPTIMIZATION.md)** - 大规模部署的网络优化配置
+- **[P2P 修复总结](docs/P2P_FIXES_SUMMARY.md)** - P2P 连接问题修复详解
+- **[UPnP 支持文档](docs/UPNP_SUPPORT.md)** - UPnP 自动端口映射指南
+
 ### 相关项目
 
 本项目的设计灵感和技术方案参考了以下优秀开源项目：
 
 - **[udp2raw](https://github.com/wangyu-/udp2raw)** - UDP 流量伪装为 TCP 的先驱项目，本项目 Raw Socket 实现的灵感来源
 - **[tinyfecVPN](https://github.com/wangyu-/tinyfecVPN)** - 轻量级 FEC VPN 实现，FEC 模块参考
-- **[n2n](https://github.com/ntop/n2n)** - 去中心化的 P2P VPN，P2P 架构参考
+- **[n2n](https://github.com/ntop/n2n)** - 去中心化的 P2P VPN，P2P 架构参考（详见 [技术对比分析](docs/N2N_ANALYSIS.md)）
 
 ### 技术文档
 
