@@ -41,11 +41,12 @@ type Config struct {
 	EnableKernelTune    bool `json:"enable_kernel_tune"`    // Apply kernel tunings (TFO/BBR2) on startup
 
 	// Broadcast optimization configuration (NEW)
-	BroadcastThrottleMs     int  `json:"broadcast_throttle_ms"`     // Minimum interval between broadcasts per client in ms (default 1000)
-	RouteAdvertInterval     int  `json:"route_advert_interval"`     // Route advertisement interval in seconds (default 300)
-	P2PKeepaliveInterval    int  `json:"p2p_keepalive_interval"`    // P2P keepalive interval in seconds (default 25)
-	EnableIncrementalUpdate bool `json:"enable_incremental_update"` // Send only changed peer info instead of full broadcasts (default true)
-	MaxPeerInfoBatchSize    int  `json:"max_peer_info_batch_size"`  // Maximum number of peer info updates in a batch (default 10)
+	BroadcastThrottleMs      int  `json:"broadcast_throttle_ms"`      // Minimum interval between broadcasts per client in ms (default 1000)
+	RouteAdvertInterval      int  `json:"route_advert_interval"`      // Route advertisement interval in seconds (default 300)
+	P2PKeepAliveInterval     int  `json:"p2p_keepalive_interval"`     // P2P keepalive interval in seconds (default 25)
+	EnableIncrementalUpdate  bool `json:"enable_incremental_update"`  // Send only changed peer info instead of full broadcasts (default true)
+	MaxPeerInfoBatchSize     int  `json:"max_peer_info_batch_size"`   // Maximum number of peer info updates in a batch (default 10)
+	BroadcastBatchDelayMs    int  `json:"broadcast_batch_delay_ms"`   // Delay between batches in milliseconds (default 100)
 }
 
 // DefaultConfig returns a default configuration
@@ -74,15 +75,16 @@ func DefaultConfig() *Config {
 		EnableMeshRouting:   true,
 		MaxHops:             3,
 		RouteUpdateInterval: 30,
-		P2PTimeout:              5,
-		EnableNATDetection:      true,
-		EnableXDP:               true,
-		EnableKernelTune:        true,
-		BroadcastThrottleMs:     1000,  // 1 second minimum between broadcasts per client
-		RouteAdvertInterval:     300,   // 5 minutes instead of 60 seconds
-		P2PKeepaliveInterval:    25,    // 25 seconds instead of 15 seconds
-		EnableIncrementalUpdate: true,  // Only broadcast changes
-		MaxPeerInfoBatchSize:    10,    // Batch up to 10 updates
+		P2PTimeout:               5,
+		EnableNATDetection:       true,
+		EnableXDP:                true,
+		EnableKernelTune:         true,
+		BroadcastThrottleMs:      1000,  // 1 second minimum between broadcasts per client
+		RouteAdvertInterval:      300,   // 5 minutes instead of 60 seconds
+		P2PKeepAliveInterval:     25,    // 25 seconds instead of 15 seconds
+		EnableIncrementalUpdate:  true,  // Only broadcast changes
+		MaxPeerInfoBatchSize:     10,    // Batch up to 10 updates
+		BroadcastBatchDelayMs:    100,   // 100ms delay between batches
 	}
 }
 
@@ -144,11 +146,14 @@ func LoadConfig(filename string) (*Config, error) {
 	if config.RouteAdvertInterval == 0 {
 		config.RouteAdvertInterval = 300
 	}
-	if config.P2PKeepaliveInterval == 0 {
-		config.P2PKeepaliveInterval = 25
+	if config.P2PKeepAliveInterval == 0 {
+		config.P2PKeepAliveInterval = 25
 	}
 	if config.MaxPeerInfoBatchSize == 0 {
 		config.MaxPeerInfoBatchSize = 10
+	}
+	if config.BroadcastBatchDelayMs == 0 {
+		config.BroadcastBatchDelayMs = 100
 	}
 
 	// Default multi_client to true for server mode if not explicitly set

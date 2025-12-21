@@ -354,7 +354,7 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 	if cfg.P2PEnabled && cfg.Mode == "client" {
 		t.p2pManager = p2p.NewManager(cfg.P2PPort)
 		// Set configurable keepalive interval (defaults to 25 seconds for reduced network traffic)
-		keepaliveInterval := time.Duration(cfg.P2PKeepaliveInterval) * time.Second
+		keepaliveInterval := time.Duration(cfg.P2PKeepAliveInterval) * time.Second
 		t.p2pManager.SetKeepaliveInterval(keepaliveInterval)
 		t.routingTable = routing.NewRoutingTable(cfg.MaxHops)
 	}
@@ -2977,8 +2977,11 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 			throttleDuration := time.Duration(t.config.BroadcastThrottleMs) * time.Millisecond
 			if elapsed < throttleDuration {
 				t.broadcastMux.Unlock()
-				log.Printf("Throttling broadcast for %s (last broadcast %v ago, minimum %v)",
-					newClientIPStr, elapsed, throttleDuration)
+				// Only log throttling occasionally to prevent log spam
+				if elapsed < throttleDuration/2 {
+					log.Printf("Throttling broadcast for %s (last broadcast %v ago, minimum %v)",
+						newClientIPStr, elapsed, throttleDuration)
+				}
 				return
 			}
 		}
@@ -2991,8 +2994,7 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 		t.peerCacheMux.RUnlock()
 
 		if cached && cachedInfo == peerInfo {
-			// No change, skip broadcast
-			log.Printf("Skipping broadcast for %s - peer info unchanged", newClientIPStr)
+			// No change, skip broadcast (log only occasionally to prevent spam)
 			return
 		}
 
@@ -3036,19 +3038,22 @@ func (t *Tunnel) broadcastPeerInfo(newClientIP net.IP, peerInfo string) {
 
 	// Limit batch size to prevent overwhelming the network
 	batchSize := t.config.MaxPeerInfoBatchSize
+	batchDelay := time.Duration(t.config.BroadcastBatchDelayMs) * time.Millisecond
+	
 	if len(clients) > batchSize {
-		log.Printf("⚠️  Batching broadcast: %d clients, limiting to %d per batch", len(clients), batchSize)
+		log.Printf("⚠️  Batching broadcast: %d clients, limiting to %d per batch with %v delay", 
+			len(clients), batchSize, batchDelay)
 		// Send to first batch immediately, schedule rest
 		t.sendPeerInfoBatch(clients[:batchSize], fullPacket, punchPacket, newClientIP, newClient)
 		
-		// Schedule remaining batches with delays
+		// Schedule remaining batches with configurable delays
 		go func() {
 			for i := batchSize; i < len(clients); i += batchSize {
 				end := i + batchSize
 				if end > len(clients) {
 					end = len(clients)
 				}
-				time.Sleep(100 * time.Millisecond) // Small delay between batches
+				time.Sleep(batchDelay)
 				t.sendPeerInfoBatch(clients[i:end], fullPacket, punchPacket, newClientIP, newClient)
 			}
 		}()

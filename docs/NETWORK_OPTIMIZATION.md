@@ -4,7 +4,25 @@
 
 This document describes the network optimizations implemented to prevent broadcast storms and connection issues when operating with large numbers of clients.
 
-## Problem Statement
+## Problem Statement (问题陈述)
+
+### English
+
+When the number of clients increases, the tunnel network faces the following issues:
+
+1. **Broadcast Storm**:
+   - Server broadcasts peer info to ALL other clients whenever a new client connects (O(N) broadcasts)
+   - Clients send route advertisements every 60 seconds
+   - P2P connections send keepalive packets every 15 seconds
+   - For 100 clients, this can generate thousands of control messages per minute
+
+2. **Network Congestion**: Large numbers of broadcasts and control messages lead to:
+   - Network bandwidth consumption
+   - Queue overflow
+   - Packet loss
+   - Connection instability
+
+### 中文
 
 在客户端数量增加时，隧道网络面临以下问题：
 
@@ -47,19 +65,21 @@ This document describes the network optimizations implemented to prevent broadca
 **Configuration:**
 ```json
 {
-  "max_peer_info_batch_size": 10
+  "max_peer_info_batch_size": 10,
+  "broadcast_batch_delay_ms": 100
 }
 ```
 
 **Features:**
 - Limits broadcasts to batches of 10 clients at a time
-- Staggers remaining batches with 100ms delays
+- Staggers remaining batches with configurable delays (default 100ms)
 - Prevents network flooding when many clients are connected
 
 **Impact:**
 - For 100 clients: Breaks into 10 batches instead of 100 simultaneous broadcasts
 - Reduces peak network load by ~90%
 - Smooths traffic patterns to prevent congestion
+- Delay can be tuned based on network conditions
 
 ### 3. Reduced Route Advertisement Frequency (降低路由通告频率)
 
@@ -115,6 +135,7 @@ For servers expecting 50+ clients:
   "broadcast_throttle_ms": 1000,
   "enable_incremental_update": true,
   "max_peer_info_batch_size": 10,
+  "broadcast_batch_delay_ms": 100,
   "route_advert_interval": 300,
   "p2p_keepalive_interval": 25
 }
@@ -143,7 +164,8 @@ For environments where minimizing network traffic is critical:
   "broadcast_throttle_ms": 2000,
   "route_advert_interval": 600,
   "p2p_keepalive_interval": 40,
-  "max_peer_info_batch_size": 5
+  "max_peer_info_batch_size": 5,
+  "broadcast_batch_delay_ms": 200
 }
 ```
 
@@ -156,7 +178,8 @@ For environments where fast peer discovery is more important:
   "broadcast_throttle_ms": 500,
   "route_advert_interval": 120,
   "p2p_keepalive_interval": 15,
-  "max_peer_info_batch_size": 20
+  "max_peer_info_batch_size": 20,
+  "broadcast_batch_delay_ms": 50
 }
 ```
 
