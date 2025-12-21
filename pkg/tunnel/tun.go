@@ -15,6 +15,10 @@ const (
 	IFF_TUN     = 0x0001
 	IFF_NO_PI   = 0x1000
 	IFF_MULTI_QUEUE = 0x0100
+	
+	// TUN I/O polling interval when device would block
+	// This balances responsiveness (for signal handling) with CPU efficiency
+	tunPollInterval = 10 * time.Millisecond
 )
 
 // TunDevice represents a TUN network device
@@ -101,7 +105,9 @@ func (t *TunDevice) Read(buf []byte) (int, error) {
 				return 0, syscall.EBADF
 			}
 			// Use a short sleep to avoid busy-waiting while still being responsive
-			time.Sleep(10 * time.Millisecond)
+			// to shutdown signals. The tunPollInterval provides a good balance between
+			// CPU efficiency and shutdown responsiveness.
+			time.Sleep(tunPollInterval)
 			// Check again after sleep
 			if atomic.LoadInt32(&t.closed) != 0 {
 				return 0, syscall.EBADF
@@ -140,7 +146,9 @@ func (t *TunDevice) Write(buf []byte) (int, error) {
 				return 0, syscall.EBADF
 			}
 			// Use a short sleep to avoid busy-waiting while still being responsive
-			time.Sleep(10 * time.Millisecond)
+			// to shutdown signals. The tunPollInterval provides a good balance between
+			// CPU efficiency and shutdown responsiveness.
+			time.Sleep(tunPollInterval)
 			// Check again after sleep
 			if atomic.LoadInt32(&t.closed) != 0 {
 				return 0, syscall.EBADF
