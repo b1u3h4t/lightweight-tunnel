@@ -320,12 +320,12 @@ func (c *STUNClient) DetectNATTypeWithSTUN() (NATType, error) {
 
 	// Test 4: Check if port mapping is consistent (symmetric test)
 	// Use different destination to see if we get different mapped port
-	if result1.ChangedAddr != nil || result1.OtherAddr != nil {
-		alternateServer := result1.ChangedAddr
-		if alternateServer == nil {
-			alternateServer = result1.OtherAddr
-		}
-
+	alternateServer := result1.ChangedAddr
+	if alternateServer == nil {
+		alternateServer = result1.OtherAddr
+	}
+	
+	if alternateServer != nil {
 		// Query alternate server
 		alternateClient := NewSTUNClient(alternateServer.String(), c.timeout)
 		result4, err := alternateClient.Query(nil, false, false)

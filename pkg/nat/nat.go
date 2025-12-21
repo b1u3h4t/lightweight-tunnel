@@ -232,31 +232,39 @@ func bytesInRange(ip, start, end net.IP) bool {
 		return false
 	}
 
-	// Check if IP >= start (compare byte by byte in big-endian order)
+	// Single pass comparison: check both bounds simultaneously
 	for i := range ip {
-		if ip[i] > start[i] {
-			break // IP is definitely >= start
-		}
+		// If IP byte is less than start byte at this position, IP < start
 		if ip[i] < start[i] {
-			return false // IP is less than start
+			return false
 		}
+		// If IP byte is greater than start byte, IP is definitely >= start
+		// Now only need to check upper bound
+		if ip[i] > start[i] {
+			// Check remaining bytes against end
+			for j := i; j < len(ip); j++ {
+				if ip[j] > end[j] {
+					return false
+				}
+				if ip[j] < end[j] {
+					return true
+				}
+			}
+			return true // IP == end for remaining bytes
+		}
+		// If ip[i] == start[i], continue checking next byte
 	}
-	// If we get here without returning false,
-	// then IP >= start (either broke early because IP > start, or IP == start)
-
-	// Check if IP <= end (compare byte by byte in big-endian order)
+	
+	// All bytes equal to start, so IP == start. Now verify IP <= end
 	for i := range ip {
-		if ip[i] < end[i] {
-			break // IP is definitely <= end
-		}
 		if ip[i] > end[i] {
-			return false // IP is greater than end
+			return false
+		}
+		if ip[i] < end[i] {
+			return true
 		}
 	}
-	// If we get here without returning false,
-	// then IP <= end (either broke early because IP < end, or IP == end)
-
-	return true
+	return true // IP == start == end
 }
 
 // testSymmetricNAT tests if the NAT is symmetric by checking port binding behavior
