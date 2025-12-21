@@ -1028,8 +1028,33 @@ func (m *Manager) sendKeepalives() {
 		_, err := m.listener.WriteToUDP(keepaliveMsg, conn.RemoteAddr)
 		if err != nil {
 			log.Printf("Keepalive send error to %s: %v", ipStr, err)
-		}
-	}
+
+			// Mark peer as disconnected so routing will not rely on an invalid P2P path
+			if peer != nil {
+				peer.SetConnected(false)
+			}
+
+			// Update connection backoff state to allow immediate retry
+			conn.mu.Lock()
+			conn.consecutiveFailures++
+			conn.nextHandshakeAttemptAt = time.Time{}
+			already := conn.handshakeInProgress
+			conn.mu.Unlock()
+
+			// Trigger an immediate handshake attempt in background if not already running
+			if !already {
+				go func(c *Connection) {
+					c.mu.Lock()
+					c.handshakeInProgress = true
+					c.mu.Unlock()
+
+					m.performHandshake(c, c.IsLocalNetwork)
+
+					c.mu.Lock()
+					c.handshakeInProgress = false
+					c.mu.Unlock()
+				}(conn)
+			}
 }
 
 // qualityMonitorLoop periodically checks connection quality and updates metrics
