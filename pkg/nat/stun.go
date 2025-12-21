@@ -74,18 +74,24 @@ type STUNResult struct {
 
 // Query performs a STUN binding request
 func (c *STUNClient) Query(localAddr *net.UDPAddr, changeIP, changePort bool) (*STUNResult, error) {
-	// Create UDP connection
-	conn, err := net.DialUDP("udp4", localAddr, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create UDP connection: %v", err)
-	}
-	defer conn.Close()
-
-	// Resolve server address
+	// Resolve server address first
 	serverUDPAddr, err := net.ResolveUDPAddr("udp4", c.serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve STUN server: %v", err)
 	}
+
+	// Create UDP connection
+	// Use ListenUDP if we need to specify local address, or DialUDP with server address
+	var conn *net.UDPConn
+	if localAddr != nil {
+		conn, err = net.ListenUDP("udp4", localAddr)
+	} else {
+		conn, err = net.DialUDP("udp4", nil, serverUDPAddr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create UDP connection: %v", err)
+	}
+	defer conn.Close()
 
 	// Generate transaction ID
 	transactionID := make([]byte, 12)
@@ -100,9 +106,16 @@ func (c *STUNClient) Query(localAddr *net.UDPAddr, changeIP, changePort bool) (*
 	conn.SetDeadline(time.Now().Add(c.timeout))
 
 	// Send request
-	_, err = conn.WriteToUDP(request, serverUDPAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send STUN request: %v", err)
+	var sendErr error
+	if localAddr != nil {
+		// Using ListenUDP, so need WriteToUDP with explicit address
+		_, sendErr = conn.WriteToUDP(request, serverUDPAddr)
+	} else {
+		// Using DialUDP, connection is already bound to server
+		_, sendErr = conn.Write(request)
+	}
+	if sendErr != nil {
+		return nil, fmt.Errorf("failed to send STUN request: %v", sendErr)
 	}
 
 	// Receive response

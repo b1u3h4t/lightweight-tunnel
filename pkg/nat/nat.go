@@ -226,28 +226,35 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// bytesInRange checks if ip is between start and end
+// bytesInRange checks if ip is between start and end (inclusive)
 func bytesInRange(ip, start, end net.IP) bool {
 	if len(ip) != len(start) || len(ip) != len(end) {
 		return false
 	}
 
-	// Check each byte: IP must be >= start and <= end
+	// Compare IP addresses byte by byte in big-endian order
+	// IP >= start
 	for i := range ip {
 		if ip[i] < start[i] {
-			return false
+			return false // IP is less than start
 		}
-		if ip[i] > end[i] {
-			return false
+		if ip[i] > start[i] {
+			break // IP is definitely >= start, move to end check
 		}
-		// If this byte is within the range but not equal to start/end,
-		// then the IP is strictly within range and we can return true
-		if ip[i] > start[i] && ip[i] < end[i] {
-			return true
-		}
+		// If ip[i] == start[i], continue to next byte
 	}
 
-	// All bytes matched exactly or are at boundaries
+	// IP <= end
+	for i := range ip {
+		if ip[i] > end[i] {
+			return false // IP is greater than end
+		}
+		if ip[i] < end[i] {
+			break // IP is definitely <= end
+		}
+		// If ip[i] == end[i], continue to next byte
+	}
+
 	return true
 }
 
