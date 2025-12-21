@@ -126,6 +126,11 @@ func (m *Manager) Start() error {
 	
 	log.Printf("P2P manager listening on UDP port %d", m.localPort)
 	
+	// Note: UPnP automatic port forwarding is not fully implemented yet
+	// Gateway discovery works, but full IGD port mapping requires additional libraries
+	// For production use with UPnP, integrate github.com/huin/goupnp
+	// Manual port forwarding or STUN/hole-punching remains the primary method
+	
 	// Start packet receiver
 	m.wg.Add(1)
 	go m.receivePackets()
