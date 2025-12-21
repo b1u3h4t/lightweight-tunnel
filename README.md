@@ -150,13 +150,18 @@ TCP-over-TCP 是隧道技术中的经典问题：
 | 完全锥形 (Full Cone) | ✅ 99% | 任何外部主机都可连接 |
 | 限制锥形 (Restricted Cone) | ✅ 95% | 只有通信过的 IP 可连接 |
 | 端口限制锥形 (Port Restricted) | ✅ 90% | 只有通信过的 IP:Port 可连接 |
-| 对称型 (Symmetric) | ⚠️ 30% | 自动回退到服务器中转 |
+| 对称型 (Symmetric) | ⚠️ 50-70% | 使用端口预测策略，显著改进 |
 
 #### NAT 类型检测
 
+- **STUN 协议支持**：基于 RFC 5389 的可靠 NAT 检测
+- **多服务器回退**：使用 Google STUN 服务器确保检测成功
 - **自动检测**：启动时自动检测本地 NAT 类型
 - **智能决策**：根据双方 NAT 类型决定是否尝试 P2P
 - **优先级策略**：NAT 类型较好的一方主动发起连接
+- **端口预测**：对称 NAT 场景使用智能端口预测算法
+
+详细说明请参见 [NAT Detection Guide](docs/NAT_DETECTION.md)
 
 ### 🛠️ 智能适配
 
