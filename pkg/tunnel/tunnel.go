@@ -3098,28 +3098,7 @@ func (t *Tunnel) handleP2PRequest(requestingClient *ClientConnection, payload []
 						attempt+1, requestingIP, targetIP)
 					
 					// Process the request now that peer info is available
-					// Note: We reconstruct the logic here instead of recursive call to avoid recursion issues
-					requestingNAT := t.parseNATTypeFromPeerInfo(reqInfo)
-					targetNAT := t.parseNATTypeFromPeerInfo(tgtInfo)
-					
-					var initiator, responder *ClientConnection
-					var initiatorPeerInfo, responderPeerInfo string
-					
-					if requestingNAT.ShouldInitiateConnection(targetNAT) {
-						initiator = requestingClient
-						responder = targetClient
-						initiatorPeerInfo = reqInfo
-						responderPeerInfo = tgtInfo
-					} else {
-						initiator = targetClient
-						responder = requestingClient
-						initiatorPeerInfo = tgtInfo
-						responderPeerInfo = reqInfo
-					}
-					
-					// Send peer info to both clients for hole punching
-					t.sendPeerInfoAndPunch(initiator, responderPeerInfo)
-					t.sendPeerInfoAndPunch(responder, initiatorPeerInfo)
+					t.processP2PConnection(requestingClient, targetClient, reqInfo, tgtInfo)
 					return
 				}
 			}
@@ -3130,6 +3109,22 @@ func (t *Tunnel) handleP2PRequest(requestingClient *ClientConnection, payload []
 	}
 	
 	log.Printf("Processing P2P request: %s wants to connect to %s", requestingIP, targetIP)
+	
+	// Process the P2P connection with peer info
+	t.processP2PConnection(requestingClient, targetClient, requestingPeerInfo, targetPeerInfo)
+}
+
+// processP2PConnection handles the actual P2P connection setup logic
+// Extracted to avoid code duplication between immediate and delayed processing
+func (t *Tunnel) processP2PConnection(requestingClient, targetClient *ClientConnection, requestingPeerInfo, targetPeerInfo string) {
+	// Get client IPs for logging
+	requestingClient.mu.RLock()
+	requestingIP := requestingClient.clientIP
+	requestingClient.mu.RUnlock()
+	
+	targetClient.mu.RLock()
+	targetIP := targetClient.clientIP
+	targetClient.mu.RUnlock()
 	
 	// Parse NAT types from peer info
 	requestingNAT := t.parseNATTypeFromPeerInfo(requestingPeerInfo)

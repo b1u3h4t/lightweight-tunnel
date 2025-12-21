@@ -25,7 +25,7 @@ var (
 
 // NewClient creates a new UPnP client
 func NewClient(timeout time.Duration) *Client {
-	if timeout == 0 {
+	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
 	return &Client{
@@ -204,10 +204,10 @@ func (c *Client) addPortMappingIGD(externalPort, internalPort int, protocol stri
 	// 2. Parsing the XML to find the control URL for WANIPConnection or WANPPPConnection
 	// 3. Sending a SOAP AddPortMapping request to the control URL
 	
-	// For now, log that UPnP discovery succeeded but mapping is not implemented
-	// Users can integrate full UPnP libraries like github.com/huin/goupnp if needed
-	log.Printf("UPnP: Gateway discovered but port mapping requires full IGD implementation")
-	log.Printf("UPnP: Would map external port %d to internal %s:%d (%s)", externalPort, c.localAddr, internalPort, protocol)
+	log.Printf("UPnP: Gateway discovered but IGD port mapping not implemented")
+	log.Printf("UPnP: Port mapping requested: external %d -> internal %s:%d (%s) - NOT APPLIED", 
+		externalPort, c.localAddr, internalPort, protocol)
+	log.Printf("UPnP: For full implementation, integrate github.com/huin/goupnp")
 	
 	// Return error to indicate feature is incomplete
 	return errors.New("UPnP port mapping not fully implemented - discovery only")
@@ -216,8 +216,9 @@ func (c *Client) addPortMappingIGD(externalPort, internalPort int, protocol stri
 // deletePortMappingIGD deletes port mapping using IGD protocol
 func (c *Client) deletePortMappingIGD(externalPort int, protocol string) error {
 	// Placeholder - would require full IGD/SOAP implementation
-	log.Printf("UPnP: Would delete port mapping for port %d (%s)", externalPort, protocol)
-	return nil
+	log.Printf("UPnP: Port mapping deletion requested for port %d (%s) - NOT APPLIED", externalPort, protocol)
+	log.Printf("UPnP: For full implementation, integrate github.com/huin/goupnp")
+	return errors.New("UPnP port mapping deletion not fully implemented")
 }
 
 // getExternalIPIGD retrieves external IP using IGD protocol
