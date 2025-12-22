@@ -20,6 +20,20 @@ const (
 )
 
 // ConnRaw represents a fake TCP connection using raw sockets (真正的TCP伪装)
+//
+// PERFORMANCE CONSIDERATIONS:
+// Raw sockets (IPPROTO_TCP) in Linux receive ALL TCP packets destined for the host.
+// In server mode, each client connection shares the same raw socket (via ListenerRaw),
+// which is efficient. However, the kernel still delivers ALL packets to each raw socket,
+// and filtering happens in user space.
+//
+// Server mode uses a shared raw socket in ListenerRaw which minimizes overhead.
+// Client connections created via DialRaw each get their own raw socket, but this
+// is acceptable since clients typically have only one connection.
+//
+// The recvLoop filters packets by connection tuple (src/dst IP:port) to ensure
+// only relevant packets are processed. This filtering is necessary since raw sockets
+// don't provide the automatic demultiplexing that normal TCP sockets do.
 type ConnRaw struct {
 	rawSocket     *rawsocket.RawSocket
 	localIP       net.IP
