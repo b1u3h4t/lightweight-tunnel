@@ -114,13 +114,6 @@ install-service:
 		echo "RestartSec=5s"; \
 		echo "User=$(SERVICE_USER)"; \
 		echo "Group=$(SERVICE_GROUP)"; \
-		echo "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW"; \
-		echo "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW"; \
-		echo "NoNewPrivileges=yes"; \
-		echo "# PrivateNetwork disabled because the tunnel requires host network access"; \
-		echo "PrivateNetwork=no"; \
-		echo "PrivateTmp=yes"; \
-		echo "ProtectHome=yes"; \
 		echo ""; \
 		echo "[Install]"; \
 		echo "WantedBy=multi-user.target"; \
