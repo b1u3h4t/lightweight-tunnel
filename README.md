@@ -252,7 +252,7 @@ sudo make install-service \
 
 # 配置文件权限（示例）
 sudo mkdir -p /etc/lightweight-tunnel
-sudo chown root:lightweight-tunnel /etc/lightweight-tunnel/*.json
+sudo chown root:root /etc/lightweight-tunnel/*.json
 sudo chmod 600 /etc/lightweight-tunnel/*.json  # 仅 root 可读写
 
 # 启动服务
