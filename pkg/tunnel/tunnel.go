@@ -3006,6 +3006,12 @@ func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
 		if ip[0] == 169 && ip[1] == 254 {
 			return false
 		}
+		
+		// Don't request P2P for network addresses (host bits all zeros)
+		// Network addresses like 7.10.0.0, 10.0.0.0, etc. are not valid host addresses
+		if ip[2] == 0 && ip[3] == 0 {
+			return false
+		}
 	}
 
 	targetIPStr := targetIP.String()
@@ -3028,8 +3034,8 @@ func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
 func (t *Tunnel) requestP2PConnection(targetIP net.IP) {
 	// Double-check filtering (defensive programming)
 	if !t.shouldRequestP2P(targetIP) {
-		// Should not happen if called correctly, but log for debugging
-		log.Printf("⚠️  requestP2PConnection called for filtered IP: %s (multicast/broadcast/loopback)", targetIP)
+		// Should not happen if called correctly - this indicates a logic error
+		// Silently return without logging to reduce noise (filtering should happen earlier)
 		return
 	}
 
@@ -3120,9 +3126,9 @@ func (t *Tunnel) updateRoutesAfterP2PAttempt(tunnelIP net.IP, source string) {
 		route := t.routingTable.GetRoute(tunnelIP)
 		if route != nil && route.Type == routing.RouteDirect {
 			log.Printf("✓ P2P direct route established to %s (via %s)", tunnelIP, source)
-		} else {
-			log.Printf("⚠ P2P connection to %s not established, will use server relay", tunnelIP)
 		}
+		// Note: If P2P connection fails, packets will automatically use server relay
+		// No need to log this as a warning - it's normal fallback behavior
 	}
 }
 
