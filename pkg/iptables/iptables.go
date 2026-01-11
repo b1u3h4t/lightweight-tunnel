@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -23,17 +24,26 @@ func NewIPTablesManager() *IPTablesManager {
 
 // AddRuleForPort adds an iptables rule to drop RST packets for a specific port
 // This is essential for raw socket TCP to work properly
+// On macOS, this is a no-op as the kernel doesn't send RST packets in the same way
 func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
+	if isMacOS() {
+		log.Printf("macOS: skipping iptables rule for port %d (not required)", port)
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var rule string
 	if isServer {
-		// Server: drop RST packets sent by kernel for incoming connections on this port
-		rule = fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST --sport %d -j DROP", port)
+		// Server: drop RST packets sent by kernel in response to raw TCP packets
+		// Match TCP packets destined to port 9000 with RST flag set
+		// This catches RST packets kernel sends when it doesn't recognize our raw TCP sessions
+		rule = fmt.Sprintf("OUTPUT -p tcp --dport %d --tcp-flags RST RST -j DROP", port)
 	} else {
-		// Client: drop RST packets sent by kernel for outgoing connections on this port
-		rule = fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST --sport %d -j DROP", port)
+		// Client: drop RST packets sent by kernel for our outgoing raw TCP connections
+		// Match TCP packets from our source port with RST flag set
+		rule = fmt.Sprintf("OUTPUT -p tcp --sport %d --tcp-flags RST RST -j DROP", port)
 	}
 
 	// Check if rule already exists
@@ -45,7 +55,7 @@ func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
 	// Add the rule
 	args := strings.Split(rule, " ")
 	args = append([]string{"-A"}, args...)
-	
+
 	cmd := exec.Command("iptables", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -58,22 +68,28 @@ func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
 }
 
 // AddRuleForConnection adds iptables rules for a specific connection (both directions)
+// On macOS, this is a no-op
 func (m *IPTablesManager) AddRuleForConnection(localIP string, localPort uint16, remoteIP string, remotePort uint16, isServer bool) error {
+	if isMacOS() {
+		log.Printf("macOS: skipping iptables rule for connection %s:%d -> %s:%d (not required)", localIP, localPort, remoteIP, remotePort)
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var rules []string
-	
+
 	if isServer {
 		// Server: drop RST for this specific connection
 		rules = []string{
-			fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST -s %s --sport %d -d %s --dport %d -j DROP", 
+			fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST -s %s --sport %d -d %s --dport %d -j DROP",
 				localIP, localPort, remoteIP, remotePort),
 		}
 	} else {
 		// Client: drop RST for this specific connection
 		rules = []string{
-			fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST -s %s --sport %d -d %s --dport %d -j DROP", 
+			fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST -s %s --sport %d -d %s --dport %d -j DROP",
 				localIP, localPort, remoteIP, remotePort),
 		}
 	}
@@ -88,7 +104,7 @@ func (m *IPTablesManager) AddRuleForConnection(localIP string, localPort uint16,
 		// Add the rule
 		args := strings.Split(rule, " ")
 		args = append([]string{"-A"}, args...)
-		
+
 		cmd := exec.Command("iptables", args...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -103,23 +119,31 @@ func (m *IPTablesManager) AddRuleForConnection(localIP string, localPort uint16,
 }
 
 // RemoveAllRules removes all iptables rules added by this manager
+// On macOS, this is a no-op
 func (m *IPTablesManager) RemoveAllRules() error {
+	if isMacOS() {
+		m.mu.Lock()
+		m.rules = make([]string, 0)
+		m.mu.Unlock()
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var errors []string
-	
+
 	for _, rule := range m.rules {
 		args := strings.Split(rule, " ")
 		args = append([]string{"-D"}, args...)
-		
+
 		cmd := exec.Command("iptables", args...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("failed to remove rule '%s': %v, output: %s", rule, err, output))
 			continue
 		}
-		
+
 		log.Printf("Removed iptables rule: iptables -D %s", rule)
 	}
 
@@ -133,10 +157,15 @@ func (m *IPTablesManager) RemoveAllRules() error {
 }
 
 // ruleExists checks if an iptables rule already exists
+// On macOS, always returns false
 func (m *IPTablesManager) ruleExists(rule string) bool {
+	if isMacOS() {
+		return false
+	}
+
 	args := strings.Split(rule, " ")
 	args = append([]string{"-C"}, args...)
-	
+
 	cmd := exec.Command("iptables", args...)
 	err := cmd.Run()
 	return err == nil
@@ -150,8 +179,21 @@ func GenerateRule(port uint16, isServer bool) string {
 	return fmt.Sprintf("iptables -A OUTPUT -p tcp --tcp-flags RST RST --sport %d -j DROP", port)
 }
 
+// isMacOS checks if the current OS is macOS
+func isMacOS() bool {
+	return runtime.GOOS == "darwin"
+}
+
 // CheckIPTablesAvailable checks if iptables is available
+// On macOS, iptables is not available but raw sockets work without it
 func CheckIPTablesAvailable() error {
+	// macOS doesn't have iptables, but raw sockets work without it
+	// The kernel doesn't send RST packets in the same way as Linux
+	if isMacOS() {
+		log.Printf("Running on macOS: iptables not required for raw sockets")
+		return nil
+	}
+
 	cmd := exec.Command("iptables", "--version")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -161,7 +203,12 @@ func CheckIPTablesAvailable() error {
 }
 
 // ClearAllRules removes all rules (static method for cleanup)
+// On macOS, this is a no-op
 func ClearAllRules(port uint16) error {
+	if isMacOS() {
+		return nil
+	}
+
 	rules := []string{
 		fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST --sport %d -j DROP", port),
 		fmt.Sprintf("OUTPUT -p tcp --tcp-flags RST RST --dport %d -j DROP", port),
@@ -172,7 +219,7 @@ func ClearAllRules(port uint16) error {
 		// Try to remove the rule (ignore errors if it doesn't exist)
 		args := strings.Split(rule, " ")
 		args = append([]string{"-D"}, args...)
-		
+
 		cmd := exec.Command("iptables", args...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -201,14 +248,20 @@ func (m *IPTablesManager) MonitorAndReAdd(stopCh <-chan struct{}) {
 func (m *IPTablesManager) GetRules() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	rules := make([]string, len(m.rules))
 	copy(rules, m.rules)
 	return rules
 }
 
 // AddCustomRule adds a custom iptables rule
+// On macOS, this is a no-op
 func (m *IPTablesManager) AddCustomRule(rule string) error {
+	if isMacOS() {
+		log.Printf("macOS: skipping custom iptables rule (not required)")
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -218,7 +271,7 @@ func (m *IPTablesManager) AddCustomRule(rule string) error {
 
 	args := strings.Split(rule, " ")
 	args = append([]string{"-A"}, args...)
-	
+
 	cmd := exec.Command("iptables", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

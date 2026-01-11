@@ -3,9 +3,17 @@ package rawsocket
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
+	"runtime"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
 )
 
 const (
@@ -25,26 +33,64 @@ const (
 // RawSocket represents a raw socket for sending/receiving raw IP packets
 type RawSocket struct {
 	fd         int
+	sendFd     int // Separate socket for sending on macOS
 	localIP    net.IP
 	localPort  uint16
 	remoteIP   net.IP
 	remotePort uint16
 	isServer   bool
+
+	// macOS-specific: use libpcap for receiving
+	pcapHandle *pcap.Handle
+	pcapMu     sync.Mutex
+	pcapPacket chan []byte
 }
 
 // NewRawSocket creates a new raw socket
 func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort uint16, isServer bool) (*RawSocket, error) {
-	// Create raw socket (IPPROTO_RAW for sending, IPPROTO_TCP for receiving)
+	// Create raw socket for receiving (IPPROTO_TCP)
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw socket: %v (需要root权限)", err)
 	}
 
-	// Set IP_HDRINCL to indicate we will provide IP header
-	err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
-	if err != nil {
-		syscall.Close(fd)
-		return nil, fmt.Errorf("failed to set IP_HDRINCL: %v", err)
+	// On macOS, we use a different approach: don't set IP_HDRINCL for sending
+	// This allows the kernel to build the IP header automatically
+	sendFd := fd // Default: use same socket
+	if runtime.GOOS == "darwin" {
+		// Create a separate socket for sending without IP_HDRINCL
+		// This allows macOS kernel to build IP header automatically
+		sendFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+		if err != nil {
+			sendFd = fd // Fallback to receive socket
+		} else {
+			// Do NOT set IP_HDRINCL - let kernel build IP header
+			// On macOS, DON'T bind the send socket to a specific IP/port
+			// Binding causes the kernel to send RST packets when it sees
+			// raw TCP packets from a port it thinks should be "listening"
+			// Instead, let the kernel choose the source address/port automatically
+			//
+			// NOTE: The source IP will be determined by the kernel based on routing
+			// The source port will be random (as expected for outgoing connections)
+		}
+	}
+
+	// Set IP_HDRINCL on receive socket
+	// On macOS, we should NOT set IP_HDRINCL for receiving - it prevents receiving packets
+	// The kernel needs to process the packets first, then we can receive them
+	if runtime.GOOS == "darwin" {
+		// On macOS, don't set IP_HDRINCL for receiving - this allows kernel to process packets
+		// and then pass them to us
+	} else {
+		// On Linux, we need IP_HDRINCL for receiving
+		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
+		if err != nil {
+			syscall.Close(fd)
+			if sendFd != fd {
+				syscall.Close(sendFd)
+			}
+			return nil, fmt.Errorf("failed to set IP_HDRINCL: %v", err)
+		}
 	}
 
 	// Set socket to non-blocking mode for better control
@@ -53,29 +99,155 @@ func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort 
 		return nil, fmt.Errorf("failed to set non-blocking: %v", err)
 	}
 
-	// Bind to local address if server
-	if isServer && localIP != nil {
+	// On macOS, try different binding strategies to receive packets
+	if runtime.GOOS == "darwin" {
+		// Try binding to INADDR_ANY first to receive all packets
+		anyAddr := syscall.SockaddrInet4{
+			Port: 0,
+		}
+		// INADDR_ANY = 0.0.0.0
+		anyAddr.Addr[0] = 0
+		anyAddr.Addr[1] = 0
+		anyAddr.Addr[2] = 0
+		anyAddr.Addr[3] = 0
+
+		if err := syscall.Bind(fd, &anyAddr); err != nil {
+			// If binding to INADDR_ANY fails, try binding to local IP
+			if localIP != nil {
+				addr := syscall.SockaddrInet4{
+					Port: 0,
+				}
+				copy(addr.Addr[:], localIP.To4())
+				syscall.Bind(fd, &addr) // Ignore error
+			}
+		}
+	} else if localIP != nil {
+		// On Linux, bind to local IP
 		addr := syscall.SockaddrInet4{
-			Port: int(localPort),
+			Port: 0,
 		}
 		copy(addr.Addr[:], localIP.To4())
-		
-		if err := syscall.Bind(fd, &addr); err != nil {
-			syscall.Close(fd)
-			return nil, fmt.Errorf("failed to bind socket: %v", err)
-		}
+		syscall.Bind(fd, &addr) // Ignore error
 	}
 
 	rs := &RawSocket{
 		fd:         fd,
+		sendFd:     sendFd,
 		localIP:    localIP,
 		localPort:  localPort,
 		remoteIP:   remoteIP,
 		remotePort: remotePort,
 		isServer:   isServer,
+		pcapPacket: make(chan []byte, 100),
+	}
+
+	// On macOS, try to use libpcap for receiving packets
+	// This can bypass the raw socket limitation
+	if runtime.GOOS == "darwin" {
+		// Try to open pcap handle
+		handle, err := pcap.OpenLive("any", 65535, true, pcap.BlockForever)
+		if err == nil {
+			// Set filter to capture TCP packets
+			// For client: capture packets from server (src port = remotePort) to us (dst port = localPort)
+			// For server: capture packets to our port (dst port = localPort)
+			var filter string
+			if !isServer && remotePort != 0 {
+				// Client mode: capture packets from server port to our local port
+				filter = fmt.Sprintf("tcp and (dst port %d or src port %d)", localPort, remotePort)
+			} else {
+				// Server mode: capture packets to our port
+				filter = fmt.Sprintf("tcp port %d", localPort)
+			}
+
+			if err := handle.SetBPFFilter(filter); err == nil {
+				rs.pcapHandle = handle
+				// Start pcap receiver in background
+				go rs.pcapReceiver()
+				log.Printf("✅ pcap receiver started with filter: %s", filter)
+			} else {
+				log.Printf("⚠️  Failed to set pcap filter '%s': %v", filter, err)
+				handle.Close()
+			}
+		} else {
+			log.Printf("⚠️  Failed to open pcap handle: %v (raw socket will be used)", err)
+		}
 	}
 
 	return rs, nil
+}
+
+// pcapReceiver receives packets using libpcap (macOS workaround)
+func (rs *RawSocket) pcapReceiver() {
+	if rs.pcapHandle == nil {
+		return
+	}
+
+	packetSource := gopacket.NewPacketSource(rs.pcapHandle, rs.pcapHandle.LinkType())
+	for packet := range packetSource.Packets() {
+		// Extract IP and TCP layers
+		ipLayer := packet.Layer(layers.LayerTypeIPv4)
+		tcpLayer := packet.Layer(layers.LayerTypeTCP)
+
+		if ipLayer != nil && tcpLayer != nil {
+			ip, _ := ipLayer.(*layers.IPv4)
+			tcp, _ := tcpLayer.(*layers.TCP)
+
+			// Filter for our connection
+			// For server: accept packets to our port
+			// For client: accept packets from server to our local port
+			// During handshake/reconnection, we may not have remoteIP set yet, so be more lenient
+			matches := false
+			if rs.isServer {
+				matches = uint16(tcp.DstPort) == rs.localPort
+			} else {
+				// Client mode: check if packet is from server to us
+				// Check: packet to our local port AND (from remote IP/port OR from any IP with remote port)
+				if uint16(tcp.DstPort) == rs.localPort {
+					if rs.remoteIP != nil && rs.remotePort != 0 {
+						// Strict match: from server IP and port
+						matches = ip.SrcIP.Equal(rs.remoteIP) && uint16(tcp.SrcPort) == rs.remotePort
+					} else if rs.remotePort != 0 {
+						// During handshake: accept any packet to our local port from server port
+						// This allows us to receive SYN-ACK during handshake even if remoteIP not set yet
+						matches = uint16(tcp.SrcPort) == rs.remotePort
+					} else {
+						// If remotePort is 0, accept any packet to our local port (shouldn't happen in normal operation)
+						matches = true
+					}
+				} else if rs.remotePort != 0 && uint16(tcp.SrcPort) == rs.remotePort {
+					// Also accept packets from server port (in case destination port changed)
+					matches = ip.SrcIP.Equal(rs.remoteIP) || rs.remoteIP == nil
+				}
+			}
+
+			if matches {
+				// Build packet data (IP header + TCP header + payload)
+				packetData := make([]byte, 0, len(ip.Contents)+len(tcp.Contents)+len(tcp.Payload))
+				packetData = append(packetData, ip.Contents...)
+				packetData = append(packetData, tcp.Contents...)
+				packetData = append(packetData, tcp.Payload...)
+
+				// Send to channel (non-blocking)
+				select {
+				case rs.pcapPacket <- packetData:
+					// Successfully queued
+				default:
+					// Channel full, drop packet (shouldn't happen often with buffer size 100)
+				}
+			} else {
+				// Debug: log filtered packets during handshake (first few only)
+				// This helps diagnose why SYN-ACK might not be received
+				if !rs.isServer && rs.remotePort != 0 && uint16(tcp.DstPort) == rs.localPort {
+					// This is a packet to our port but filtered - log for debugging
+					// Only log SYN-ACK packets to reduce noise
+					if tcp.SYN && tcp.ACK {
+						log.Printf("🔍 pcapReceiver: Filtered SYN-ACK from %s:%d to %s:%d (expected from %s:%d)",
+							ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort, rs.remoteIP, rs.remotePort)
+					}
+				}
+			}
+		}
+	}
 }
 
 // BuildIPHeader constructs an IPv4 header
@@ -217,24 +389,38 @@ func CalculateChecksum(data []byte) uint16 {
 }
 
 // SendPacket sends a raw IP packet with TCP header and payload
-func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, 
+func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16,
 	seq, ack uint32, flags uint8, tcpOptions, payload []byte) error {
 
-	// Build TCP header (without checksum)
+	// Build TCP header (without checksum first)
 	tcpHeader := BuildTCPHeader(srcPort, dstPort, seq, ack, flags, 65535, tcpOptions)
 
-	// Calculate TCP checksum
-	checksum := CalculateTCPChecksum(srcIP, dstIP, tcpHeader, payload)
+	// Use the local IP from the socket if available, otherwise use the provided srcIP
+	ipSrc := srcIP
+	if rs.localIP != nil {
+		ipSrc = rs.localIP
+	}
+
+	// Calculate TCP checksum (needed even if kernel builds IP header)
+	checksum := CalculateTCPChecksum(ipSrc, dstIP, tcpHeader, payload)
 	binary.BigEndian.PutUint16(tcpHeader[16:18], checksum)
 
-	// Build IP header
-	ipHeader := BuildIPHeader(srcIP, dstIP, IPPROTO_TCP, len(tcpHeader)+len(payload))
-
-	// Combine IP header + TCP header + payload
-	packet := make([]byte, len(ipHeader)+len(tcpHeader)+len(payload))
-	copy(packet[0:], ipHeader)
-	copy(packet[len(ipHeader):], tcpHeader)
-	copy(packet[len(ipHeader)+len(tcpHeader):], payload)
+	// On macOS, if sendFd doesn't have IP_HDRINCL, send only TCP header + payload
+	// The kernel will automatically build the IP header
+	var packet []byte
+	if runtime.GOOS == "darwin" && rs.sendFd != rs.fd {
+		// macOS: send only TCP header + payload (kernel builds IP header)
+		packet = make([]byte, len(tcpHeader)+len(payload))
+		copy(packet[0:], tcpHeader)
+		copy(packet[len(tcpHeader):], payload)
+	} else {
+		// Linux or same socket: build full IP packet with IP_HDRINCL
+		ipHeader := BuildIPHeader(ipSrc, dstIP, IPPROTO_TCP, len(tcpHeader)+len(payload))
+		packet = make([]byte, len(ipHeader)+len(tcpHeader)+len(payload))
+		copy(packet[0:], ipHeader)
+		copy(packet[len(ipHeader):], tcpHeader)
+		copy(packet[len(ipHeader)+len(tcpHeader):], payload)
+	}
 
 	// Send packet
 	addr := syscall.SockaddrInet4{
@@ -242,7 +428,8 @@ func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstP
 	}
 	copy(addr.Addr[:], dstIP.To4())
 
-	err := syscall.Sendto(rs.fd, packet, 0, &addr)
+	// Use sendFd for sending (separate socket on macOS without IP_HDRINCL)
+	err := syscall.Sendto(rs.sendFd, packet, 0, &addr)
 	if err != nil {
 		return fmt.Errorf("failed to send packet: %v", err)
 	}
@@ -254,8 +441,75 @@ func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstP
 func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16,
 	seq, ack uint32, flags uint8, payload []byte, err error) {
 
+	// On macOS, try to use libpcap first (if available)
+	if runtime.GOOS == "darwin" && rs.pcapHandle != nil {
+		select {
+		case packetData := <-rs.pcapPacket:
+			// Parse packet from pcap
+			if len(packetData) < IPHeaderSize+TCPHeaderSize {
+				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet too small: %d bytes", len(packetData))
+			}
+
+			// Copy to buf if it fits
+			if len(packetData) <= len(buf) {
+				copy(buf, packetData)
+			}
+
+			// Parse IP header
+			ipHeader := packetData[:IPHeaderSize]
+			ihl := (ipHeader[0] & 0x0F) * 4
+			if int(ihl) > len(packetData) {
+				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("invalid IP header length")
+			}
+
+			protocol := ipHeader[9]
+			if protocol != IPPROTO_TCP {
+				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("not a TCP packet")
+			}
+
+			srcIP = net.IPv4(ipHeader[12], ipHeader[13], ipHeader[14], ipHeader[15])
+			dstIP = net.IPv4(ipHeader[16], ipHeader[17], ipHeader[18], ipHeader[19])
+
+			// Parse TCP header
+			tcpStart := int(ihl)
+			if len(packetData) < tcpStart+TCPHeaderSize {
+				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet too small for TCP header")
+			}
+
+			tcpHeader := packetData[tcpStart : tcpStart+TCPHeaderSize]
+			srcPort = binary.BigEndian.Uint16(tcpHeader[0:2])
+			dstPort = binary.BigEndian.Uint16(tcpHeader[2:4])
+			seq = binary.BigEndian.Uint32(tcpHeader[4:8])
+			ack = binary.BigEndian.Uint32(tcpHeader[8:12])
+			dataOffset := (tcpHeader[12] >> 4) * 4
+			flags = tcpHeader[13]
+
+			// Extract payload
+			payloadStart := tcpStart + int(dataOffset)
+			if payloadStart < len(packetData) {
+				payload = make([]byte, len(packetData)-payloadStart)
+				copy(payload, packetData[payloadStart:])
+			}
+
+			return srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, nil
+		case <-time.After(100 * time.Millisecond):
+			// Timeout - fall through to raw socket
+		}
+	}
+
+	// Fall back to raw socket (or use it on Linux)
 	n, _, err := syscall.Recvfrom(rs.fd, buf, 0)
 	if err != nil {
+		// On macOS, EAGAIN/EWOULDBLOCK is common - kernel processed the packet
+		if runtime.GOOS == "darwin" {
+			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+				// This is expected on macOS - kernel processed the packet
+				// Return a timeout-like error that can be handled by the caller
+				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet not available (macOS kernel processed it)")
+			}
+			// Other errors on macOS
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("failed to receive packet on macOS: %v", err)
+		}
 		return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("failed to receive packet: %v", err)
 	}
 
@@ -306,7 +560,7 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 func (rs *RawSocket) SetReadTimeout(sec, usec int64) error {
 	tv := syscall.Timeval{
 		Sec:  sec,
-		Usec: usec,
+		Usec: int32(usec),
 	}
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 }
@@ -315,14 +569,28 @@ func (rs *RawSocket) SetReadTimeout(sec, usec int64) error {
 func (rs *RawSocket) SetWriteTimeout(sec, usec int64) error {
 	tv := syscall.Timeval{
 		Sec:  sec,
-		Usec: usec,
+		Usec: int32(usec),
 	}
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
 }
 
 // Close closes the raw socket
 func (rs *RawSocket) Close() error {
-	return syscall.Close(rs.fd)
+	var err error
+
+	// Close pcap handle if used
+	if rs.pcapHandle != nil {
+		rs.pcapHandle.Close()
+		rs.pcapHandle = nil
+	}
+
+	if rs.sendFd != rs.fd {
+		err = syscall.Close(rs.sendFd)
+	}
+	if closeErr := syscall.Close(rs.fd); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // GetLocalAddr returns local address

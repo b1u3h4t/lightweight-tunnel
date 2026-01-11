@@ -10,6 +10,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,12 +52,13 @@ const (
 	P2PMaxBackoffSeconds           = 32 // Maximum backoff delay in seconds
 
 	// Queue management constants
-	QueueSendTimeout = 100 * time.Millisecond // Timeout for queue send operations to handle temporary congestion
+	QueueSendTimeout = 500 * time.Millisecond // Timeout for queue send operations to handle temporary congestion (increased from 100ms to reduce packet drops)
 
 	// Connection health constants
 	// IdleConnectionTimeout is the maximum time without receiving packets before considering connection dead
-	// Set to 3x the keepalive interval to allow for some packet loss
-	IdleConnectionTimeout = 30 * time.Second // 3x default keepalive (10s)
+	// Set to 6x the keepalive interval to allow for network delays and packet loss
+	// Increased from 30s to 60s to reduce unnecessary reconnections
+	IdleConnectionTimeout = 60 * time.Second // 6x default keepalive (10s)
 
 	// Rotation and advertisement timing
 	KeyRotationGracePeriod     = 15 * time.Second
@@ -233,6 +235,15 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 
 	// Check if raw socket is supported (requires root)
 	if err := faketcp.CheckRawSocketSupport(); err != nil {
+		if runtime.GOOS == "darwin" {
+			return nil, fmt.Errorf("⚠️  macOS 限制：Raw Socket 模式在 macOS 上可能无法发送 raw TCP 包\n"+
+				"这是 macOS 系统的安全限制，不是代码问题\n"+
+				"可能的解决方案：\n"+
+				"1. 在 Linux 服务器上运行（推荐）\n"+
+				"2. 使用虚拟机运行 Linux\n"+
+				"3. 检查 macOS 系统设置和权限\n"+
+				"错误详情: %v", err)
+		}
 		return nil, fmt.Errorf("Raw Socket模式需要root权限运行\n"+
 			"请使用以下命令运行: sudo ./lightweight-tunnel -m %s ...\n"+
 			"错误详情: %v", cfg.Mode, err)
@@ -715,6 +726,14 @@ func (t *Tunnel) configureTUN() error {
 	ip := parts[0]
 	netmask := parts[1]
 
+	if runtime.GOOS == "darwin" {
+		return t.configureTUNmacOS(ip, netmask)
+	}
+	return t.configureTUNLinux(ip, netmask)
+}
+
+// configureTUNLinux configures TUN device on Linux using ip command
+func (t *Tunnel) configureTUNLinux(ip, netmask string) error {
 	// Set IP address
 	cmd := exec.Command("ip", "addr", "add", t.config.TunnelAddr, "dev", t.tunName)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -734,6 +753,97 @@ func (t *Tunnel) configureTUN() error {
 	}
 
 	log.Printf("Configured %s with IP %s/%s, MTU %d", t.tunName, ip, netmask, t.config.MTU)
+	return nil
+}
+
+// configureTUNmacOS configures TUN device on macOS using ifconfig command
+func (t *Tunnel) configureTUNmacOS(ip, netmask string) error {
+	// Convert CIDR mask to netmask format (e.g., /24 -> 255.255.255.0)
+	maskBits, err := strconv.Atoi(netmask)
+	if err != nil {
+		return fmt.Errorf("invalid netmask: %s", netmask)
+	}
+
+	// Create netmask from CIDR bits
+	mask := net.CIDRMask(maskBits, 32)
+	if mask == nil {
+		return fmt.Errorf("invalid CIDR mask: %s", netmask)
+	}
+
+	// Convert to IP address string
+	netmaskIP := net.IP(mask).String()
+
+	// On macOS, if the interface name is just "utun", we need to find the actual interface name
+	// The system assigns names like utun0, utun1, etc. automatically
+	actualInterfaceName := t.tunName
+	if t.tunName == "utun" {
+		// Try to find the actual utun interface by checking ifconfig output
+		// We'll look for the first utun interface that doesn't have an IP address yet
+		cmd := exec.Command("ifconfig", "-l")
+		output, err := cmd.Output()
+		if err == nil {
+			interfaces := strings.Fields(string(output))
+			for _, iface := range interfaces {
+				if strings.HasPrefix(iface, "utun") {
+					// Check if this interface is already configured
+					checkCmd := exec.Command("ifconfig", iface)
+					checkOutput, _ := checkCmd.Output()
+					// If the interface exists but doesn't have our IP, use it
+					if !strings.Contains(string(checkOutput), ip) {
+						actualInterfaceName = iface
+						break
+					}
+				}
+			}
+		}
+		// If we couldn't find one, try utun0, utun1, etc. until one works
+		if actualInterfaceName == "utun" {
+			for i := 0; i < 10; i++ {
+				tryName := fmt.Sprintf("utun%d", i)
+				cmd := exec.Command("ifconfig", tryName)
+				if err := cmd.Run(); err == nil {
+					// Interface exists, try to configure it
+					actualInterfaceName = tryName
+					break
+				}
+			}
+		}
+		// Update the tunnel name
+		t.tunName = actualInterfaceName
+	}
+
+	// Set IP address and netmask, and bring interface up
+	// On macOS, utun is a point-to-point interface, so we need to specify destination
+	// For a tunnel, we can use the network address + 1 as destination, or use the same IP
+	// Try using CIDR notation first (modern ifconfig supports it)
+	cmd := exec.Command("ifconfig", actualInterfaceName, "inet", t.config.TunnelAddr, "up")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		// If CIDR fails, try with explicit netmask and use network address as destination
+		// Calculate network address
+		_, ipNet, err := net.ParseCIDR(t.config.TunnelAddr)
+		if err != nil {
+			return fmt.Errorf("failed to parse tunnel address: %v", err)
+		}
+		// Use first IP in network as destination (network + 1)
+		networkIP := ipNet.IP
+		destIP := make(net.IP, len(networkIP))
+		copy(destIP, networkIP)
+		destIP[len(destIP)-1]++ // Increment last octet
+
+		// Try with destination address
+		cmd = exec.Command("ifconfig", actualInterfaceName, "inet", ip, "netmask", netmaskIP, destIP.String(), "up")
+		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("failed to configure interface: %v, output: %s; tried with destination: %v, output: %s", err, output, err2, output2)
+		}
+	}
+
+	// Set MTU
+	cmd = exec.Command("ifconfig", actualInterfaceName, "mtu", fmt.Sprintf("%d", t.config.MTU))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set MTU: %v, output: %s", err, output)
+	}
+
+	log.Printf("Configured %s with IP %s/%s, MTU %d", actualInterfaceName, ip, netmask, t.config.MTU)
 	return nil
 }
 
@@ -921,65 +1031,165 @@ func (t *Tunnel) handleClient(conn faketcp.ConnAdapter) {
 func (t *Tunnel) tunReader() {
 	defer t.wg.Done()
 
+	// Use a fixed buffer to avoid allocations in the hot path
+	const maxPacketSize = 1500
+	buf := make([]byte, maxPacketSize)
+
+	log.Printf("tunReader started (blocking mode)")
+
 	for {
 		select {
 		case <-t.stopCh:
+			log.Printf("tunReader stopping")
 			return
 		default:
 		}
 
-		buf := t.getPacketBuffer()
-		// Leave one byte headroom so prependPacketType can reuse the buffer without reallocating.
-		readBuf := buf[:t.packetBufSize-1]
-		n, err := t.tunFile.Read(readBuf)
+		// Read from TUN device (blocking mode on both Linux and macOS for consistency)
+		// Blocking mode ensures immediate packet delivery when data is available
+		// This prevents TUN buffer overflow which causes "No buffer space available" errors
+		n, err := t.tunFile.Read(buf)
 		if err != nil {
 			if errors.Is(err, syscall.EBADF) {
-				t.releasePacketBuffer(buf)
 				return
+			}
+			// On macOS, ENOBUFS can occur when reading if buffer is full
+			// This means we need to read even faster
+			if err == syscall.ENOBUFS {
+				// Buffer is full, continue immediately to try reading again
+				log.Printf("⚠️  TUN read ENOBUFS, retrying immediately")
+				continue
 			}
 			select {
 			case <-t.stopCh:
-				// Tunnel is stopping, no need to log
+				return
 			default:
 				log.Printf("TUN read error: %v", err)
 			}
-			t.releasePacketBuffer(buf)
 			return
 		}
 
-		if n > 0 {
-			// Skip packets that are too small or not IPv4
-			if n < IPv4MinHeaderLen {
-				t.releasePacketBuffer(buf)
-				continue
-			}
+		// With blocking mode, Read should block until data is available
+		// If we get 0 bytes, it's unusual but continue
+		if n == 0 {
+			log.Printf("⚠️  TUN read returned 0 bytes (unexpected in blocking mode)")
+			continue
+		}
 
-			// Check if packet is IPv4 (skip non-IPv4 packets like IPv6)
-			if readBuf[0]>>4 != IPv4Version {
-				t.releasePacketBuffer(buf)
-				continue
-			}
+		// Log that we read a packet (for debugging - log all packets initially)
+		log.Printf("🔍 TUN read: %d bytes", n)
 
-			packet := readBuf[:n]
-
-			// Use intelligent routing if P2P is enabled
-			if t.config.P2PEnabled && t.routingTable != nil {
-				queued, err := t.sendPacketWithRouting(packet)
-				if !queued {
-					t.releasePacketBuffer(buf)
+		// On macOS, utun devices prepend a 4-byte protocol family header (AF_INET = 2)
+		// Skip this header if present
+		// Format: 0x00 0x00 0x00 0x02 (big-endian, AF_INET = 2)
+		packetStart := 0
+		if runtime.GOOS == "darwin" && n >= 4 {
+			// Check if first 4 bytes are protocol family header
+			// AF_INET = 2, format is typically: 0x00 0x00 0x00 0x02 (big-endian)
+			// Or sometimes: 0x02 0x00 0x00 0x00 (little-endian)
+			// Check both formats and also check if first byte is 0x45 (IPv4 header start)
+			// If first byte is 0x45, there's no header; otherwise check for protocol family
+			if buf[0] == 0x45 {
+				// This is already an IPv4 packet, no header to skip
+				packetStart = 0
+			} else if (buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x02) ||
+				(buf[0] == 0x02 && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x00) ||
+				(buf[0] == 0x00 && buf[1] == 0x00 && buf[2] == 0x00 && buf[3] == 0x00 && n > 4 && buf[4] == 0x45) {
+				// This looks like a protocol family header, skip it
+				packetStart = 4
+				n -= 4
+				if n < 200 {
+					log.Printf("🔍 Skipped 4-byte protocol header, remaining: %d bytes", n)
 				}
-				if err != nil {
-					log.Printf("Failed to send packet: %v", err)
+			} else if n > 4 && buf[4] == 0x45 {
+				// First 4 bytes are not 0x45, but byte 4 is 0x45, so skip first 4 bytes
+				packetStart = 4
+				n -= 4
+				if n < 200 {
+					log.Printf("🔍 Skipped 4-byte protocol header (detected by IPv4 header at offset 4), remaining: %d bytes", n)
 				}
-			} else {
-				// Default: queue for server
-				if !enqueueWithTimeout(t.sendQueue, packet, t.stopCh) {
-					t.releasePacketBuffer(buf)
-					select {
-					case <-t.stopCh:
-						return
-					default:
-						log.Printf("Send queue full after timeout, dropping packet")
+			}
+		}
+
+		// Skip packets that are too small or not IPv4
+		if n < IPv4MinHeaderLen {
+			if n+packetStart < 200 {
+				log.Printf("⚠️  Packet too small: %d bytes (min: %d)", n, IPv4MinHeaderLen)
+			}
+			continue
+		}
+
+		// Check if packet is IPv4 (skip non-IPv4 packets like IPv6)
+		version := buf[packetStart] >> 4
+		if version != IPv4Version {
+			if n+packetStart < 200 {
+				log.Printf("⚠️  Not IPv4 packet: version=%d (first byte: 0x%02x)", version, buf[packetStart])
+			}
+			continue
+		}
+
+		// Copy packet to a buffer from pool (we can't reuse buf as it may be overwritten)
+		// Skip the protocol family header if present (macOS)
+		packetBuf := t.getPacketBuffer()
+		packet := packetBuf[:n]
+		copy(packet, buf[packetStart:packetStart+n])
+
+		// Extract destination IP for logging
+		var dstIPStr string
+		if len(packet) >= IPv4DstIPOffset+4 {
+			dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
+			dstIPStr = dstIP.String()
+		}
+
+		// Use intelligent routing if P2P is enabled
+		if t.config.P2PEnabled && t.routingTable != nil {
+			if n < 200 {
+				log.Printf("📤 Routing packet to %s via P2P routing", dstIPStr)
+			}
+			queued, err := t.sendPacketWithRouting(packet)
+			if !queued {
+				t.releasePacketBuffer(packetBuf)
+			}
+			if err != nil {
+				log.Printf("Failed to send packet: %v", err)
+			} else if n < 200 {
+				log.Printf("✅ Packet routed via P2P")
+			}
+		} else {
+			// Default: queue for server
+			// Use immediate drop if queue is full to prevent blocking TUN read
+			// This is critical on macOS to prevent TUN buffer overflow
+			select {
+			case t.sendQueue <- packet:
+				// Successfully queued - packet will be sent by netWriter
+				// Log first few packets to verify flow (ICMP packets are ~84 bytes)
+				if n < 200 {
+					log.Printf("📤 Queued packet from TUN: %d bytes to %s (queue size: %d)", n, dstIPStr, len(t.sendQueue))
+				}
+			case <-t.stopCh:
+				t.releasePacketBuffer(packetBuf)
+				return
+			case <-time.After(QueueSendTimeout):
+				// Wait for queue space before dropping
+				// This handles temporary bursts without immediately dropping packets
+				queueSize := len(t.sendQueue)
+				select {
+				case t.sendQueue <- packet:
+					// Successfully queued after waiting
+					if n < 200 {
+						log.Printf("📤 Queued packet after wait: %d bytes to %s (queue size: %d)", n, dstIPStr, len(t.sendQueue))
+					}
+				case <-t.stopCh:
+					t.releasePacketBuffer(packetBuf)
+					return
+				default:
+					// Queue is still full after timeout, drop to prevent TUN buffer overflow
+					t.releasePacketBuffer(packetBuf)
+					// Only log occasionally to avoid log spam
+					if queueSize > 0 && queueSize%500 == 0 {
+						log.Printf("⚠️  Send queue full (size: %d), dropping packets to prevent TUN buffer overflow", queueSize)
+					} else if n < 200 {
+						log.Printf("⚠️  Send queue full after timeout, dropping packet to %s (queue size: %d)", dstIPStr, queueSize)
 					}
 				}
 			}
@@ -1017,12 +1227,25 @@ func (t *Tunnel) tunReaderServer() {
 			return
 		}
 
+		// On macOS, utun devices prepend a 4-byte protocol family header (AF_INET = 2)
+		// Skip this header if present
+		packetStart := 0
+		if runtime.GOOS == "darwin" && n >= 4 {
+			// Check if first 4 bytes look like protocol family header (AF_INET = 2 in little-endian)
+			protoFamily := uint32(readBuf[0]) | (uint32(readBuf[1]) << 8) | (uint32(readBuf[2]) << 16) | (uint32(readBuf[3]) << 24)
+			if protoFamily == 2 || (readBuf[0] == 0 && readBuf[1] == 0 && (readBuf[2] != 0 || readBuf[3] != 0)) {
+				// This looks like a protocol family header, skip it
+				packetStart = 4
+				n -= 4
+			}
+		}
+
 		if n < IPv4MinHeaderLen {
 			t.releasePacketBuffer(buf)
 			continue
 		}
 
-		packet := readBuf[:n]
+		packet := readBuf[packetStart : packetStart+n]
 
 		// Parse destination IP from packet (IPv4)
 		// IP header: version(4 bits) + IHL(4 bits) + ... + dst IP (4 bytes starting at offset 16 for IPv4)
@@ -1033,6 +1256,15 @@ func (t *Tunnel) tunReaderServer() {
 		}
 
 		dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
+
+		// Extract source IP for logging
+		srcIP := net.IP(packet[IPv4SrcIPOffset : IPv4SrcIPOffset+4])
+		protocol := packet[9] // Protocol field in IP header
+
+		// Log all ICMP packets from TUN for debugging
+		if protocol == 1 { // ICMP
+			log.Printf("🔵 Server TUN read ICMP: %d bytes, src=%s, dst=%s", len(packet), srcIP, dstIP)
+		}
 
 		// Check if packet is destined for server itself
 		// NOTE: This should rarely/never happen because packets destined for the server
@@ -1062,8 +1294,13 @@ func (t *Tunnel) tunReaderServer() {
 		// Find the client with this destination IP
 		client := t.getClientByIP(dstIP)
 		if client != nil {
+			// Log forwarding for debugging (ICMP packets are small)
+			if len(packet) < 200 || protocol == 1 {
+				log.Printf("📤 Server forwarding packet to client %s: %d bytes (src=%s, dst=%s, protocol=%d)", client.clientIP, len(packet), srcIP, dstIP, protocol)
+			}
 			select {
 			case client.sendQueue <- packet:
+				// Successfully queued
 			case <-t.stopCh:
 				t.releasePacketBuffer(buf)
 				return
@@ -1071,25 +1308,35 @@ func (t *Tunnel) tunReaderServer() {
 				// Wait for queue space before logging and dropping
 				select {
 				case client.sendQueue <- packet:
+					if len(packet) < 200 {
+						log.Printf("📤 Server queued packet to client %s after wait: %d bytes", client.clientIP, len(packet))
+					}
 				case <-t.stopCh:
 					t.releasePacketBuffer(buf)
 					return
 				default:
-					log.Printf("⚠️  Client send queue full for %s after timeout, dropping packet", dstIP)
+					log.Printf("⚠️  Client send queue full for %s after timeout, dropping packet (client: %s)", dstIP, client.clientIP)
 					t.releasePacketBuffer(buf)
 				}
 			}
 		} else {
 			// Try advertised routes
 			if routeClient := t.findRouteClient(dstIP); routeClient != nil {
+				if len(packet) < 200 {
+					log.Printf("📤 Server forwarding packet via route to client %s: %d bytes (dst=%s)", routeClient.clientIP, len(packet), dstIP)
+				}
 				select {
 				case routeClient.sendQueue <- packet:
+					// Successfully queued
 				case <-t.stopCh:
 					t.releasePacketBuffer(buf)
 					return
 				case <-time.After(QueueSendTimeout):
 					select {
 					case routeClient.sendQueue <- packet:
+						if len(packet) < 200 {
+							log.Printf("📤 Server queued packet via route after wait: %d bytes", len(packet))
+						}
 					case <-t.stopCh:
 						t.releasePacketBuffer(buf)
 						return
@@ -1099,6 +1346,12 @@ func (t *Tunnel) tunReaderServer() {
 					}
 				}
 			} else {
+				// No client found - this is expected for packets to server itself or external destinations
+				// But log for debugging to see if responses are being dropped
+				// Always log ICMP packets as they are likely responses that should be forwarded
+				if len(packet) < 200 || protocol == 1 {
+					log.Printf("⚠️  Server TUN packet to %s: no client found (src=%s, protocol=%d, may be server itself or external)", dstIP, srcIP, protocol)
+				}
 				t.releasePacketBuffer(buf)
 			}
 		}
@@ -1115,14 +1368,49 @@ func (t *Tunnel) tunWriter() {
 		case <-t.stopCh:
 			return
 		case packet := <-t.recvQueue:
-			if _, err := t.tunFile.Write(packet); err != nil {
+			// Write to TUN device - the Write method handles ENOBUFS retries internally
+			// Log first few packets to verify flow (increase threshold to see ICMP packets)
+			if len(packet) < 200 {
+				log.Printf("📝 Writing packet to TUN: %d bytes", len(packet))
+			}
+
+			// On macOS, utun devices require a 4-byte protocol family header (AF_INET = 2) before the IP packet
+			var writePacket []byte
+			if runtime.GOOS == "darwin" {
+				// Prepend AF_INET (2) in big-endian format: 0x00 0x00 0x00 0x02
+				// This matches the format used when reading from utun
+				writePacket = make([]byte, 4+len(packet))
+				writePacket[0] = 0
+				writePacket[1] = 0
+				writePacket[2] = 0
+				writePacket[3] = 2 // AF_INET in big-endian (last byte)
+				copy(writePacket[4:], packet)
+			} else {
+				writePacket = packet
+			}
+
+			_, err := t.tunFile.Write(writePacket)
+			if err != nil {
 				select {
 				case <-t.stopCh:
-					// Tunnel is stopping, no need to log
+					return
 				default:
+					// On macOS, ENOBUFS means TUN buffer is full
+					// This usually means tunReader isn't reading fast enough
+					// Drop the packet and continue to prevent blocking
+					if err == syscall.ENOBUFS {
+						// Only log occasionally to avoid spam
+						recvQueueSize := len(t.recvQueue)
+						if recvQueueSize%100 == 0 {
+							log.Printf("⚠️  TUN write buffer full (ENOBUFS), recv queue size: %d. Packet dropped.", recvQueueSize)
+						}
+						// Don't return - continue processing other packets
+						continue
+					}
+					// Other errors are more serious
 					log.Printf("TUN write error: %v", err)
+					return
 				}
-				return
 			}
 		}
 	}
@@ -1150,8 +1438,24 @@ func (t *Tunnel) netReader() {
 		t.lastRecvMux.Unlock()
 
 		if timeSinceLastRecv > IdleConnectionTimeout {
-			log.Printf("Connection idle for %v (threshold: %v), forcing reconnection...",
-				timeSinceLastRecv, IdleConnectionTimeout)
+			// Check if we have packets in send queue - if so, don't close connection yet
+			// This prevents losing packets during reconnection
+			sendQueueSize := len(t.sendQueue)
+			if sendQueueSize > 0 {
+				// We have packets waiting to be sent, but connection is idle
+				// This suggests server is not responding, but we should try to send queued packets first
+				log.Printf("⚠️  Connection idle for %v (threshold: %v), but %d packets in queue. Waiting a bit longer...",
+					timeSinceLastRecv, IdleConnectionTimeout, sendQueueSize)
+				// Give it a bit more time (5 seconds) to see if server responds
+				// This helps when server is slow but still processing
+				if timeSinceLastRecv < IdleConnectionTimeout+5*time.Second {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
+
+			log.Printf("⚠️  Connection idle for %v (threshold: %v), forcing reconnection... (send queue size: %d)",
+				timeSinceLastRecv, IdleConnectionTimeout, sendQueueSize)
 
 			// Close and clear current connection
 			t.connMux.Lock()
@@ -1167,10 +1471,13 @@ func (t *Tunnel) netReader() {
 			t.lastRecvMux.Unlock()
 
 			// Attempt reconnection
+			reconnectStart := time.Now()
 			if err := t.reconnectToServer(); err != nil {
 				// Only returns error when stopCh is closed
 				return
 			}
+			reconnectDuration := time.Since(reconnectStart)
+			log.Printf("⚠️  Reconnection after idle timeout took %v (send queue size: %d)", reconnectDuration, len(t.sendQueue))
 
 			log.Printf("Reconnection successful after idle timeout")
 			t.reannounceP2PInfoAfterReconnect()
@@ -1193,7 +1500,15 @@ func (t *Tunnel) netReader() {
 		packet, err := t.conn.ReadPacket()
 		if err != nil {
 			// Check if it's a timeout - if so, continue to allow checking stopCh and idle timeout
+			// Don't treat timeout as fatal - keepalive should prevent idle timeout
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Log timeout occasionally to debug connection issues
+				// But don't reconnect on timeout - let idle timeout logic handle it
+				if timeSinceLastRecv > 5*time.Second {
+					log.Printf("⚠️  ReadPacket timeout (last recv: %v ago, keepalive should prevent this)", timeSinceLastRecv)
+				}
+				// Continue to allow checking stopCh and idle timeout
+				// The idle timeout check above will handle reconnection if needed
 				continue
 			}
 
@@ -1242,14 +1557,27 @@ func (t *Tunnel) netReader() {
 		t.lastRecvTime = time.Now()
 		t.lastRecvMux.Unlock()
 
+		// Log ALL raw packet reception for debugging (not just small ones)
+		// Only log if packet is not a keepalive to reduce noise
+		if len(packet) > 50 || len(packet) < 50 {
+			log.Printf("🔵 Raw packet received from server: %d bytes", len(packet))
+		}
+
 		// Decrypt if cipher is available
+		// Note: decryptPacket handles both encrypted and unencrypted packets
 		decryptedPacket, err := t.decryptPacket(packet)
 		if err != nil {
-			log.Printf("Decryption error (wrong key?): %v", err)
+			// Log decryption errors with more detail
+			firstBytesLen := 16
+			if len(packet) < firstBytesLen {
+				firstBytesLen = len(packet)
+			}
+			log.Printf("❌ Decryption error: %v (packet len: %d, first bytes: %x)", err, len(packet), packet[:firstBytesLen])
 			continue
 		}
 
 		if len(decryptedPacket) < 1 {
+			log.Printf("⚠️  Decrypted packet too small: %d bytes", len(decryptedPacket))
 			continue
 		}
 
@@ -1257,9 +1585,32 @@ func (t *Tunnel) netReader() {
 		packetType := decryptedPacket[0]
 		payload := decryptedPacket[1:]
 
+		// Log packet type for debugging - log ALL packets to see what we're receiving
+		// Only log non-keepalive packets to reduce noise
+		if packetType != PacketTypeKeepalive {
+			log.Printf("🔵 Packet type: %d (0x%02x), payload: %d bytes, decrypted: %d bytes", packetType, packetType, len(payload), len(decryptedPacket))
+		}
+
 		switch packetType {
 		case PacketTypeData:
 			// Queue for TUN device
+			// Log ALL data packets to verify flow
+			log.Printf("✅ Received PacketTypeData (0x%02x): %d bytes payload", packetType, len(payload))
+			// Log first few packets to verify flow (increase threshold to see ICMP packets)
+			if len(payload) < 200 {
+				// Extract source and destination IP for logging
+				var srcIPStr, dstIPStr string
+				if len(payload) >= IPv4DstIPOffset+4 {
+					srcIP := net.IP(payload[IPv4SrcIPOffset : IPv4SrcIPOffset+4])
+					dstIP := net.IP(payload[IPv4DstIPOffset : IPv4DstIPOffset+4])
+					srcIPStr = srcIP.String()
+					dstIPStr = dstIP.String()
+					protocol := payload[9]
+					log.Printf("📥 Received packet from server: %d bytes, %s -> %s, protocol=%d (queue size: %d)", len(payload), srcIPStr, dstIPStr, protocol, len(t.recvQueue))
+				} else {
+					log.Printf("📥 Received packet from server: %d bytes (queue size: %d)", len(payload), len(t.recvQueue))
+				}
+			}
 			if !enqueueWithTimeout(t.recvQueue, payload, t.stopCh) {
 				select {
 				case <-t.stopCh:
@@ -1269,7 +1620,12 @@ func (t *Tunnel) netReader() {
 				}
 			}
 		case PacketTypeKeepalive:
-			// Keepalive received, no action needed
+			// Keepalive received, update last receive time to prevent idle timeout
+			// This is critical - keepalive packets should reset the idle timer
+			t.lastRecvMux.Lock()
+			t.lastRecvTime = time.Now()
+			t.lastRecvMux.Unlock()
+			// No other action needed for keepalive
 		case PacketTypePublicAddr:
 			// Server sent us our public address
 			publicAddr := string(payload)
@@ -1283,7 +1639,7 @@ func (t *Tunnel) netReader() {
 				go func() {
 					// Perform NAT detection
 					t.p2pManager.DetectNATType(t.config.RemoteAddr)
-					
+
 					// After NAT detection completes, announce peer info to server
 					// This ensures peer info is available when P2P connections are requested
 					log.Printf("NAT detection complete, announcing peer info to server")
@@ -1356,13 +1712,26 @@ func (t *Tunnel) netWriter() {
 					}
 				}
 
+				// Log ALL packets being sent to server for comparison with server logs
+				// Extract destination IP for logging
+				var dstIPStr string
+				if len(packet) >= IPv4DstIPOffset+4 {
+					// IPv4 destination IP is at offset 16 (IPv4DstIPOffset)
+					// Read 4 bytes and convert to net.IP
+					dstIPBytes := make([]byte, 4)
+					copy(dstIPBytes, packet[IPv4DstIPOffset:IPv4DstIPOffset+4])
+					dstIP := net.IP(dstIPBytes)
+					dstIPStr = dstIP.String()
+				}
+				log.Printf("📡 Sending packet to server: %d bytes (encrypted: %d bytes), dst=%s", len(packet), len(encryptedPacket), dstIPStr)
+
 				if err := t.conn.WritePacket(encryptedPacket); err != nil {
 					select {
 					case <-t.stopCh:
 						// Tunnel is stopping, no need to log
 						return
 					default:
-						log.Printf("Network write error: %v, attempting reconnection...", err)
+						log.Printf("Network write error: %v (send queue size: %d), attempting reconnection...", err, len(t.sendQueue))
 					}
 
 					// Close and clear connection then try to reconnect
@@ -1374,20 +1743,20 @@ func (t *Tunnel) netWriter() {
 					t.connMux.Unlock()
 
 					// Keep trying to reconnect - only exits if tunnel is stopping
+					reconnectStart := time.Now()
 					if err := t.reconnectToServer(); err != nil {
 						// Only returns error when stopCh is closed
 						return
 					}
-
-					// Try writing once more after reconnect
-					log.Printf("Reconnection successful, retrying packet send")
+					reconnectDuration := time.Since(reconnectStart)
+					log.Printf("⚠️  Reconnection took %v (send queue size: %d), retrying packet send", reconnectDuration, len(t.sendQueue))
 
 					// Re-announce P2P info after reconnection to re-establish P2P connections
 					t.reannounceP2PInfoAfterReconnect()
 
 					if t.conn != nil {
 						if err2 := t.conn.WritePacket(encryptedPacket); err2 != nil {
-							log.Printf("Network write retry failed: %v, packet will be lost", err2)
+							log.Printf("❌ Network write retry failed: %v, packet will be lost (queue size: %d)", err2, len(t.sendQueue))
 							// Don't return - continue processing queue
 							// Accept packet loss to maintain tunnel connectivity for subsequent packets.
 							// This is better than exiting the goroutine, which would prevent any future
@@ -1523,6 +1892,9 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 		client.lastRecvTime = time.Now()
 		client.mu.Unlock()
 
+		// Log raw packet reception for debugging
+		log.Printf("🔵 Server received raw packet from client %s: %d bytes", client.conn.RemoteAddr(), len(packet))
+
 		// Decrypt if cipher is available (supports previous key during grace)
 		decryptedPacket, usedCipher, gen, err := t.decryptPacketForServer(packet)
 		if err != nil {
@@ -1541,6 +1913,9 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 		// Check packet type
 		packetType := decryptedPacket[0]
 		payload := decryptedPacket[1:]
+
+		// Log decrypted packet type
+		log.Printf("🔵 Server decrypted packet type: %d (0x%02x), payload: %d bytes", packetType, packetType, len(payload))
 
 		switch packetType {
 		case PacketTypeData:
@@ -1567,11 +1942,27 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 				// Route packet based on destination
 				dstIP := net.IP(payload[IPv4DstIPOffset : IPv4DstIPOffset+4])
 
+				// Log received data packet for debugging
+				log.Printf("📥 Server received PacketTypeData: %d bytes, src=%s, dst=%s", len(payload), srcIP, dstIP)
+
 				// Check if destination is another client
 				if t.config.ClientIsolation {
 					// In isolation mode, only send to TUN device (server)
 					// Clients cannot communicate with each other
-					if _, err := t.tunFile.Write(payload); err != nil {
+					// On macOS, utun devices require a 4-byte protocol family header (AF_INET = 2) before the IP packet
+					var writePacket []byte
+					if runtime.GOOS == "darwin" {
+						// Prepend AF_INET (2) in big-endian format: 0x00 0x00 0x00 0x02
+						writePacket = make([]byte, 4+len(payload))
+						writePacket[0] = 0
+						writePacket[1] = 0
+						writePacket[2] = 0
+						writePacket[3] = 2 // AF_INET in big-endian (last byte)
+						copy(writePacket[4:], payload)
+					} else {
+						writePacket = payload
+					}
+					if _, err := t.tunFile.Write(writePacket); err != nil {
 						select {
 						case <-t.stopCh:
 							// Tunnel is stopping, no need to log
@@ -1586,13 +1977,13 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 					if targetClient != nil && targetClient != client {
 						// Forward to target client (server relay mode)
 						// This is expected when P2P is not yet established or when P2P fails
-						// 
+						//
 						// IMPORTANT: payload comes from aead.Open which allocates a new slice
 						// We need to copy it into a pooled buffer so it can be properly recycled
 						forwardBuf := t.getPacketBuffer()
 						forwardPacket := forwardBuf[:len(payload)]
 						copy(forwardPacket, payload)
-						
+
 						queued := false
 						select {
 						case targetClient.sendQueue <- forwardPacket:
@@ -1625,20 +2016,51 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 						}
 					} else {
 						// Send to TUN device (for server or unknown destination)
-						if _, err := t.tunFile.Write(payload); err != nil {
+						// Extract protocol for logging
+						protocol := payload[9] // Protocol field in IP header
+						if protocol == 1 {     // ICMP
+							log.Printf("📥 Server writing ICMP request to TUN: %d bytes, src=%s, dst=%s", len(payload), srcIP, dstIP)
+						}
+
+						// On macOS, utun devices require a 4-byte protocol family header (AF_INET = 2) before the IP packet
+						var writePacket []byte
+						if runtime.GOOS == "darwin" {
+							// Prepend AF_INET (2) in big-endian format: 0x00 0x00 0x00 0x02
+							writePacket = make([]byte, 4+len(payload))
+							writePacket[0] = 0
+							writePacket[1] = 0
+							writePacket[2] = 0
+							writePacket[3] = 2 // AF_INET in big-endian (last byte)
+							copy(writePacket[4:], payload)
+						} else {
+							writePacket = payload
+						}
+						if _, err := t.tunFile.Write(writePacket); err != nil {
 							select {
 							case <-t.stopCh:
 								// Tunnel is stopping, no need to log
 							default:
-								log.Printf("TUN write error: %v", err)
+								if protocol == 1 {
+									log.Printf("❌ Server TUN write error for ICMP: %v", err)
+								} else {
+									log.Printf("TUN write error: %v", err)
+								}
 							}
 							return
+						}
+						if protocol == 1 {
+							log.Printf("✅ Server successfully wrote ICMP request to TUN: %d bytes", len(payload))
 						}
 					}
 				}
 			}
 		case PacketTypeKeepalive:
-			// Keepalive received, no action needed
+			// Keepalive received, update last receive time to prevent idle timeout
+			// This is critical for server-side client connections too
+			client.mu.Lock()
+			client.lastRecvTime = time.Now()
+			client.mu.Unlock()
+			// No other action needed for keepalive
 		case PacketTypePeerInfo:
 			// Handle peer info from client (server mode) - store but don't broadcast
 			if t.config.P2PEnabled {
@@ -2345,6 +2767,50 @@ func (t *Tunnel) addRoute(route string) error {
 	}
 	route = ipNet.String()
 
+	if runtime.GOOS == "darwin" {
+		// macOS uses 'route' command instead of 'ip'
+		// First, delete any existing route for this network to avoid conflicts
+		networkIP := ipNet.IP.Mask(ipNet.Mask) // Get network address
+		network := networkIP.String()
+		mask := ipNet.Mask
+		ones, _ := mask.Size()
+		netmaskIP := net.IP(mask).String()
+
+		// Delete existing routes for this network (try all possible formats)
+		// This ensures we don't have conflicting routes pointing to different interfaces
+		_ = exec.Command("route", "delete", "-net", network, "-netmask", netmaskIP).Run()
+		_ = exec.Command("route", "delete", "-net", fmt.Sprintf("%s/%d", network, ones)).Run()
+		_ = exec.Command("route", "delete", "-net", network).Run()
+
+		// macOS route command: use -interface flag to specify the exact TUN interface
+		// Format: route add -net <network>/<prefix> -interface <interface>
+		// This ensures the route points to the correct TUN device
+		// Note: On macOS, when using -interface, we don't need to specify gateway
+		cmd := exec.Command("route", "add", "-net", fmt.Sprintf("%s/%d", network, ones), "-interface", t.tunName)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Log the error for debugging
+			log.Printf("Failed to add route via -interface: %v (output: %s)", err, output)
+			// Try alternative: route add -net <network> -interface <interface>
+			cmd = exec.Command("route", "add", "-net", network, "-interface", t.tunName)
+			if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+				log.Printf("Failed to add route (alternative): %v (output: %s)", err2, output2)
+				// Last resort: try without -interface (may route to wrong interface, but better than nothing)
+				parts := strings.Split(t.config.TunnelAddr, "/")
+				if len(parts) == 2 {
+					gatewayIP := parts[0]
+					cmd = exec.Command("route", "add", "-net", fmt.Sprintf("%s/%d", network, ones), gatewayIP)
+					if output3, err3 := cmd.CombinedOutput(); err3 != nil {
+						return fmt.Errorf("failed to add route: %v (output: %s); tried -interface: %v (output: %s); tried without -interface: %v (output: %s)", err, output, err2, output2, err3, output3)
+					}
+				} else {
+					return fmt.Errorf("failed to add route: %v (output: %s); tried -interface: %v (output: %s)", err, output, err2, output2)
+				}
+			}
+		}
+		return nil
+	}
+
+	// Linux uses 'ip' command
 	cmd := exec.Command("ip", "route", "replace", route, "dev", t.tunName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%v (output: %s)", err, output)
@@ -2365,6 +2831,30 @@ func (t *Tunnel) deleteRoute(route string) {
 	}
 	route = ipNet.String()
 
+	if runtime.GOOS == "darwin" {
+		// macOS uses 'route' command instead of 'ip'
+		// Format: route delete -net <network>/<prefix> <gateway>
+		network := ipNet.IP.String()
+		mask := ipNet.Mask
+		ones, _ := mask.Size()
+
+		// Get the TUN interface IP address to use as gateway
+		parts := strings.Split(t.config.TunnelAddr, "/")
+		if len(parts) == 2 {
+			gatewayIP := parts[0]
+
+			// Try with prefix length first
+			cmd := exec.Command("route", "delete", "-net", fmt.Sprintf("%s/%d", network, ones), gatewayIP)
+			_, _ = cmd.CombinedOutput()
+
+			// Also try with netmask
+			cmd = exec.Command("route", "delete", "-net", network, "-netmask", net.IP(mask).String(), gatewayIP)
+			_, _ = cmd.CombinedOutput()
+		}
+		return
+	}
+
+	// Linux uses 'ip' command
 	cmd := exec.Command("ip", "route", "del", route, "dev", t.tunName)
 	_, _ = cmd.CombinedOutput()
 }
@@ -2410,27 +2900,43 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) (bool, error) {
 		return false, nil
 	}
 
-	// No P2P connection - try to establish one on-demand
+	// No P2P connection - try to establish one on-demand (but don't block packet sending)
+	// Only request P2P for valid unicast addresses (filtering is done in shouldRequestP2P)
 	if t.config.P2PEnabled && t.p2pManager != nil {
 		// Check if we should request P2P connection
 		if t.shouldRequestP2P(dstIP) {
-			// Send P2P request to server
-			t.requestP2PConnection(dstIP)
+			// Send P2P request to server (async, don't block packet sending)
+			go t.requestP2PConnection(dstIP)
 		}
 	}
 
-	// For now, send via server (P2P will be established for future packets)
+	// Always send via server (P2P will be established for future packets)
+	// This ensures packets are delivered even if P2P is not yet established
+	log.Printf("📤 No P2P connection to %s, sending via server relay (packet: %d bytes)", dstIP, len(packet))
 	return t.sendViaServer(packet)
 }
 
 // shouldRequestP2P checks if we should request a P2P connection to the target IP
 // Returns false if a request is already pending or was recently made
 func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
+	// Don't request P2P for invalid, multicast, broadcast, or loopback addresses
+	if targetIP == nil || targetIP.IsUnspecified() || targetIP.IsMulticast() || targetIP.IsLoopback() {
+		return false
+	}
+
+	// Don't request P2P for link-local addresses (169.254.0.0/16)
+	if targetIP.To4() != nil {
+		ip := targetIP.To4()
+		if ip[0] == 169 && ip[1] == 254 {
+			return false
+		}
+	}
+
 	targetIPStr := targetIP.String()
-	
+
 	t.p2pRequestMux.Lock()
 	defer t.p2pRequestMux.Unlock()
-	
+
 	// Check if request already pending
 	if lastReq, exists := t.pendingP2PRequests[targetIPStr]; exists {
 		// Don't request again if less than 5 seconds since last request
@@ -2438,37 +2944,44 @@ func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
 // requestP2PConnection sends a P2P connection request to the server
 func (t *Tunnel) requestP2PConnection(targetIP net.IP) {
+	// Double-check filtering (defensive programming)
+	if !t.shouldRequestP2P(targetIP) {
+		// Should not happen if called correctly, but log for debugging
+		log.Printf("⚠️  requestP2PConnection called for filtered IP: %s (multicast/broadcast/loopback)", targetIP)
+		return
+	}
+
 	targetIPStr := targetIP.String()
-	
+
 	// Mark as pending
 	t.p2pRequestMux.Lock()
 	t.pendingP2PRequests[targetIPStr] = time.Now()
 	t.p2pRequestMux.Unlock()
-	
+
 	// Build request message: format is just the target tunnel IP
 	payload := []byte(targetIPStr)
 	fullPacket := make([]byte, len(payload)+1)
 	fullPacket[0] = PacketTypeP2PRequest
 	copy(fullPacket[1:], payload)
-	
+
 	// Encrypt and send
 	encryptedPacket, err := t.encryptPacket(fullPacket)
 	if err != nil {
 		log.Printf("Failed to encrypt P2P request: %v", err)
 		return
 	}
-	
+
 	// Send to server
 	t.connMux.Lock()
 	conn := t.conn
 	t.connMux.Unlock()
-	
+
 	if conn != nil {
 		if err := conn.WritePacket(encryptedPacket); err != nil {
 			log.Printf("Failed to send P2P request to server: %v", err)
@@ -2481,20 +2994,28 @@ func (t *Tunnel) requestP2PConnection(targetIP net.IP) {
 // sendViaServer sends packet through the server connection
 // Uses timeout-based approach to handle queue congestion
 func (t *Tunnel) sendViaServer(packet []byte) (bool, error) {
+	queueSize := len(t.sendQueue)
 	select {
 	case t.sendQueue <- packet:
+		// Successfully queued
+		if queueSize > 1000 {
+			log.Printf("⚠️  Send queue size was high: %d (now: %d)", queueSize, len(t.sendQueue))
+		}
 		return true, nil
 	case <-t.stopCh:
 		return false, errors.New("tunnel stopped")
 	case <-time.After(QueueSendTimeout):
 		// Wait for queue space before giving up
 		// This handles temporary bursts without immediately dropping packets
+		newQueueSize := len(t.sendQueue)
 		select {
 		case t.sendQueue <- packet:
+			log.Printf("⚠️  Send queue was full, waited %v and queued successfully (queue size: %d -> %d)", QueueSendTimeout, queueSize, newQueueSize)
 			return true, nil
 		case <-t.stopCh:
 			return false, errors.New("tunnel stopped")
 		default:
+			log.Printf("❌ Send queue full after timeout, dropping packet (queue size: %d)", newQueueSize)
 			return false, errors.New("send queue full after timeout")
 		}
 	}
@@ -2838,6 +3359,15 @@ func (t *Tunnel) announcePeerInfo() error {
 		return nil
 	}
 
+	// Check if connection exists (may be nil during reconnection)
+	t.connMux.Lock()
+	conn := t.conn
+	t.connMux.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection not available (may be reconnecting)")
+	}
+
 	// Get local P2P port
 	p2pPort := t.p2pManager.GetLocalPort()
 
@@ -2861,7 +3391,7 @@ func (t *Tunnel) announcePeerInfo() error {
 	publicP2PAddr := fmt.Sprintf("%s:%d", publicHost, p2pPort)
 
 	// Get local address for local network peers
-	localAddr := t.conn.LocalAddr()
+	localAddr := conn.LocalAddr()
 	if localAddr == nil {
 		return fmt.Errorf("connection has no local address")
 	}
@@ -2896,8 +3426,17 @@ func (t *Tunnel) announcePeerInfo() error {
 		return fmt.Errorf("failed to encrypt peer info: %v", err)
 	}
 
+	// Re-check connection before sending (may have been closed during processing)
+	t.connMux.Lock()
+	conn = t.conn
+	t.connMux.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection closed during peer info announcement")
+	}
+
 	// Send to server
-	if err := t.conn.WritePacket(encryptedPacket); err != nil {
+	if err := conn.WritePacket(encryptedPacket); err != nil {
 		return fmt.Errorf("failed to send peer info: %v", err)
 	}
 
@@ -2910,11 +3449,11 @@ func (t *Tunnel) announcePeerInfo() error {
 func (t *Tunnel) retryAnnouncePeerInfo() {
 	const maxRetries = 5
 	retries := 0
-	
+
 	for retries < maxRetries {
 		// Wait with exponential backoff
 		backoffSeconds := 1 << uint(retries) // 1, 2, 4, 8, 16 seconds
-		
+
 		select {
 		case <-time.After(time.Duration(backoffSeconds) * time.Second):
 			// Try to announce
@@ -3092,7 +3631,7 @@ func (t *Tunnel) handleP2PRequest(requestingClient *ClientConnection, payload []
 	if !t.config.P2PEnabled {
 		return
 	}
-	
+
 	// Parse target IP from request
 	targetIPStr := string(payload)
 	targetIP := net.ParseIP(targetIPStr)
@@ -3100,72 +3639,72 @@ func (t *Tunnel) handleP2PRequest(requestingClient *ClientConnection, payload []
 		log.Printf("Invalid P2P request: bad target IP %s", targetIPStr)
 		return
 	}
-	
+
 	// Get requesting client's IP
 	requestingClient.mu.RLock()
 	requestingIP := requestingClient.clientIP
 	requestingPeerInfo := requestingClient.lastPeerInfo
 	requestingClient.mu.RUnlock()
-	
+
 	if requestingIP == nil {
 		log.Printf("P2P request from unregistered client, ignoring")
 		return
 	}
-	
+
 	// Find target client
 	targetClient := t.getClientByIP(targetIP)
 	if targetClient == nil {
 		log.Printf("P2P request for unknown target %s, ignoring", targetIPStr)
 		return
 	}
-	
+
 	// Get target client's peer info
 	targetClient.mu.RLock()
 	targetPeerInfo := targetClient.lastPeerInfo
 	targetClient.mu.RUnlock()
-	
+
 	// Check if peer info is available
 	if requestingPeerInfo == "" || targetPeerInfo == "" {
 		log.Printf("P2P request but peer info not available (requesting=%v, target=%v) - waiting for clients to announce",
 			requestingPeerInfo == "", targetPeerInfo == "")
-		
+
 		// Send a notification to clients to announce their peer info if not done yet
 		// This helps in case peer info was not announced due to network issues
 		// Wait a bit and retry (peer info should arrive soon after NAT detection)
 		go func() {
 			// Limit to prevent infinite recursion
 			const maxWaitAttempts = 10
-			
+
 			// Wait for peer info to become available (up to 10 seconds)
 			for attempt := 0; attempt < maxWaitAttempts; attempt++ {
 				time.Sleep(1 * time.Second)
-				
+
 				// Re-check peer info
 				requestingClient.mu.RLock()
 				reqInfo := requestingClient.lastPeerInfo
 				requestingClient.mu.RUnlock()
-				
+
 				targetClient.mu.RLock()
 				tgtInfo := targetClient.lastPeerInfo
 				targetClient.mu.RUnlock()
-				
+
 				if reqInfo != "" && tgtInfo != "" {
-					log.Printf("Peer info now available after %d seconds, processing P2P request from %s to %s", 
+					log.Printf("Peer info now available after %d seconds, processing P2P request from %s to %s",
 						attempt+1, requestingIP, targetIP)
-					
+
 					// Process the request now that peer info is available
 					t.processP2PConnection(requestingClient, targetClient, reqInfo, tgtInfo)
 					return
 				}
 			}
-			log.Printf("Timeout waiting for peer info for P2P request from %s to %s after %d seconds", 
+			log.Printf("Timeout waiting for peer info for P2P request from %s to %s after %d seconds",
 				requestingIP, targetIP, maxWaitAttempts)
 		}()
 		return
 	}
-	
+
 	log.Printf("Processing P2P request: %s wants to connect to %s", requestingIP, targetIP)
-	
+
 	// Process the P2P connection with peer info
 	t.processP2PConnection(requestingClient, targetClient, requestingPeerInfo, targetPeerInfo)
 }
@@ -3177,19 +3716,19 @@ func (t *Tunnel) processP2PConnection(requestingClient, targetClient *ClientConn
 	requestingClient.mu.RLock()
 	requestingIP := requestingClient.clientIP
 	requestingClient.mu.RUnlock()
-	
+
 	targetClient.mu.RLock()
 	targetIP := targetClient.clientIP
 	targetClient.mu.RUnlock()
-	
+
 	// Parse NAT types from peer info
 	requestingNAT := t.parseNATTypeFromPeerInfo(requestingPeerInfo)
 	targetNAT := t.parseNATTypeFromPeerInfo(targetPeerInfo)
-	
+
 	// Determine who should initiate connection based on NAT levels
 	var initiator, responder *ClientConnection
 	var initiatorPeerInfo, responderPeerInfo string
-	
+
 	if requestingNAT.GetLevel() > targetNAT.GetLevel() {
 		// Requesting client has worse NAT, it should initiate
 		initiator = requestingClient
@@ -3215,13 +3754,13 @@ func (t *Tunnel) processP2PConnection(requestingClient, targetClient *ClientConn
 		log.Printf("Same NAT level: %s (requester) will try first, then %s if it fails",
 			requestingIP, targetIP)
 	}
-	
+
 	// Send peer info and PUNCH to initiator
 	t.sendPeerInfoAndPunch(initiator, initiatorPeerInfo)
-	
+
 	// Also send to responder so it's ready to respond
 	t.sendPeerInfoAndPunch(responder, responderPeerInfo)
-	
+
 	log.Printf("P2P coordination complete for %s <-> %s", requestingIP, targetIP)
 }
 
@@ -3261,29 +3800,29 @@ func (t *Tunnel) sendPeerInfoAndPunch(client *ClientConnection, peerInfo string)
 	peerInfoPacket := make([]byte, len(peerInfo)+1)
 	peerInfoPacket[0] = PacketTypePeerInfo
 	copy(peerInfoPacket[1:], []byte(peerInfo))
-	
+
 	encryptedPeerInfo, err := t.encryptForClient(client, peerInfoPacket)
 	if err != nil {
 		log.Printf("Failed to encrypt peer info: %v", err)
 		return
 	}
-	
+
 	if err := client.conn.WritePacket(encryptedPeerInfo); err != nil {
 		log.Printf("Failed to send peer info: %v", err)
 		return
 	}
-	
+
 	// Send PUNCH command
 	punchPacket := make([]byte, len(peerInfo)+1)
 	punchPacket[0] = PacketTypePunch
 	copy(punchPacket[1:], []byte(peerInfo))
-	
+
 	encryptedPunch, err := t.encryptForClient(client, punchPacket)
 	if err != nil {
 		log.Printf("Failed to encrypt punch packet: %v", err)
 		return
 	}
-	
+
 	if err := client.conn.WritePacket(encryptedPunch); err != nil {
 		log.Printf("Failed to send punch packet: %v", err)
 	}
@@ -3291,4 +3830,3 @@ func (t *Tunnel) sendPeerInfoAndPunch(client *ClientConnection, peerInfo string)
 
 // broadcastPeerInfo is no longer used in on-demand P2P mode
 // Connections are established only when needed via handleP2PRequest
-

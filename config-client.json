@@ -1,0 +1,10 @@
+{
+  "enable_kernel_tune": true,
+  "enable_nat_detection": true,
+  "enable_xdp": true,
+  "key": "FCinzmEATXZa1sLtoTjWZpvFFsODvhHQjK5qnA3I6Io=",
+  "mode": "client",
+  "mtu": 0,
+  "remote_addr": "154.17.4.187:9000",
+  "tunnel_addr": "10.0.0.2/24"
+}
