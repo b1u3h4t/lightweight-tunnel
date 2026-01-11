@@ -2948,7 +2948,18 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) (bool, error) {
 		return false, errors.New("not IPv4 packet")
 	}
 
+	// Ensure we have enough bytes to read destination IP
+	if len(packet) < IPv4DstIPOffset+4 {
+		return false, errors.New("packet too small to read destination IP")
+	}
+
 	dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
+	
+	// Validate IP address - ensure it's a valid unicast address
+	// Filter out obviously invalid IPs (network addresses, etc.)
+	if dstIP == nil || dstIP.IsUnspecified() || dstIP.IsMulticast() || dstIP.IsLoopback() {
+		return false, fmt.Errorf("invalid destination IP: %s", dstIP)
+	}
 
 	// Check if destination is the server's tunnel IP
 	// If so, always send via server connection (never attempt P2P with server)
@@ -3006,7 +3017,7 @@ func (t *Tunnel) shouldRequestP2P(targetIP net.IP) bool {
 		if ip[0] == 169 && ip[1] == 254 {
 			return false
 		}
-		
+
 		// Don't request P2P for network addresses (host bits all zeros)
 		// Network addresses like 7.10.0.0, 10.0.0.0, etc. are not valid host addresses
 		if ip[2] == 0 && ip[3] == 0 {
