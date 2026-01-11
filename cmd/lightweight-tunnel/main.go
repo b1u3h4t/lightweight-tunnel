@@ -45,6 +45,8 @@ func main() {
 	enableNATDetection := flag.Bool("nat-detection", true, "Enable automatic NAT type detection")
 	enableXDP := flag.Bool("xdp", true, "Enable eBPF/XDP-style fast path classification to reduce CPU cost")
 	enableKernelTune := flag.Bool("kernel-tune", true, "Enable kernel tuning (TFO/BBR2) on startup")
+	enableSOCKS5 := flag.Bool("socks5", false, "Enable SOCKS5 proxy server")
+	socks5Addr := flag.String("socks5-addr", "0.0.0.0:1080", "SOCKS5 proxy listen address")
 	showVersion := flag.Bool("v", false, "Show version")
 	generateConfig := flag.String("g", "", "Generate example config file")
 	// TLS flags removed: TLS over the UDP fake-TCP transport is not supported.
@@ -108,6 +110,8 @@ func main() {
 			P2PTimeout:          5,
 			EnableXDP:           *enableXDP,
 			EnableKernelTune:    *enableKernelTune,
+			EnableSOCKS5:        *enableSOCKS5,
+			SOCKS5Addr:          *socks5Addr,
 		}
 	}
 

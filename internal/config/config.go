@@ -40,6 +40,10 @@ type Config struct {
 	EnableXDP           bool `json:"enable_xdp"`            // Enable lightweight XDP/eBPF fast-path classification
 	EnableKernelTune    bool `json:"enable_kernel_tune"`    // Apply kernel tunings (TFO/BBR2) on startup
 
+	// SOCKS5 proxy configuration
+	EnableSOCKS5 bool   `json:"enable_socks5"` // Enable SOCKS5 proxy server
+	SOCKS5Addr   string `json:"socks5_addr"`   // SOCKS5 proxy listen address (e.g., "0.0.0.0:1080")
+
 	// On-demand P2P configuration
 	RouteAdvertInterval  int `json:"route_advert_interval"`  // Route advertisement interval in seconds (default 300)
 	P2PKeepAliveInterval int `json:"p2p_keepalive_interval"` // P2P keepalive interval in seconds (default 25)
@@ -48,35 +52,37 @@ type Config struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Mode:                "server",
-		Transport:           "rawtcp", // Fixed to rawtcp for true TCP disguise
-		LocalAddr:           "0.0.0.0:9000",
-		RemoteAddr:          "",
-		TunnelAddr:          "10.0.0.1/24",
-		MTU:                 1400,
-		FECDataShards:       10,
-		FECParityShards:     3,
-		Timeout:             30,
-		KeepaliveInterval:   10,
-		SendQueueSize:       5000, // Increased from 1000 to prevent queue full errors
-		RecvQueueSize:       5000, // Increased from 1000 to handle burst traffic
-		TunName:             "",
-		Routes:              []string{},
-		ConfigPushInterval:  0,
-		MultiClient:         true,
-		MaxClients:          100,
-		ClientIsolation:     false,
-		P2PEnabled:          true,
-		P2PPort:             0, // Auto-select
-		EnableMeshRouting:   true,
-		MaxHops:             3,
-		RouteUpdateInterval: 30,
+		Mode:                 "server",
+		Transport:            "rawtcp", // Fixed to rawtcp for true TCP disguise
+		LocalAddr:            "0.0.0.0:9000",
+		RemoteAddr:           "",
+		TunnelAddr:           "10.0.0.1/24",
+		MTU:                  1400,
+		FECDataShards:        10,
+		FECParityShards:      3,
+		Timeout:              30,
+		KeepaliveInterval:    10,
+		SendQueueSize:        5000, // Increased from 1000 to prevent queue full errors
+		RecvQueueSize:        5000, // Increased from 1000 to handle burst traffic
+		TunName:              "",
+		Routes:               []string{},
+		ConfigPushInterval:   0,
+		MultiClient:          true,
+		MaxClients:           100,
+		ClientIsolation:      false,
+		P2PEnabled:           true,
+		P2PPort:              0, // Auto-select
+		EnableMeshRouting:    true,
+		MaxHops:              3,
+		RouteUpdateInterval:  30,
 		P2PTimeout:           5,
 		EnableNATDetection:   true,
 		EnableXDP:            true,
 		EnableKernelTune:     true,
 		RouteAdvertInterval:  300, // 5 minutes
 		P2PKeepAliveInterval: 25,  // 25 seconds
+		EnableSOCKS5:         false,
+		SOCKS5Addr:           "0.0.0.0:1080",
 	}
 }
 
@@ -162,6 +168,12 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if _, exists := rawConfig["enable_kernel_tune"]; !exists {
 		config.EnableKernelTune = true
+	}
+	if _, exists := rawConfig["enable_socks5"]; !exists {
+		config.EnableSOCKS5 = false
+	}
+	if config.EnableSOCKS5 && config.SOCKS5Addr == "" {
+		config.SOCKS5Addr = "0.0.0.0:1080"
 	}
 
 	return &config, nil

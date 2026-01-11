@@ -41,15 +41,15 @@ func (c *Client) Discover() error {
 		return fmt.Errorf("failed to get local IP: %v", err)
 	}
 	c.localAddr = localIP
-	
+
 	log.Printf("UPnP: Starting discovery from local IP %s", localIP)
-	
+
 	// Send SSDP discovery message
 	gatewayURL, err := c.discoverGateway()
 	if err != nil {
 		return err
 	}
-	
+
 	c.gatewayURL = gatewayURL
 	log.Printf("UPnP: Discovered gateway at %s", gatewayURL)
 	return nil
@@ -61,26 +61,26 @@ func (c *Client) AddPortMapping(externalPort, internalPort int, protocol string,
 	if c.gatewayURL == "" {
 		return ErrNoGatewayFound
 	}
-	
+
 	// Validate protocol
 	protocol = strings.ToUpper(protocol)
 	if protocol != "TCP" && protocol != "UDP" {
 		return fmt.Errorf("invalid protocol: %s (must be TCP or UDP)", protocol)
 	}
-	
+
 	// Default duration is 0 (permanent until reboot)
 	// Non-zero durations would create temporary mappings
-	
+
 	log.Printf("UPnP: Adding port mapping %s:%d -> %s:%d (%s) for %d seconds",
 		"0.0.0.0", externalPort, c.localAddr, internalPort, protocol, duration)
-	
+
 	// Try to add port mapping using IGD (Internet Gateway Device) protocol
 	err := c.addPortMappingIGD(externalPort, internalPort, protocol, description, duration)
 	if err != nil {
 		log.Printf("UPnP: Failed to add port mapping: %v", err)
 		return ErrPortMappingFailed
 	}
-	
+
 	log.Printf("UPnP: Successfully added port mapping %s:%d -> %s:%d",
 		"external", externalPort, c.localAddr, internalPort)
 	return nil
@@ -91,20 +91,20 @@ func (c *Client) DeletePortMapping(externalPort int, protocol string) error {
 	if c.gatewayURL == "" {
 		return ErrNoGatewayFound
 	}
-	
+
 	protocol = strings.ToUpper(protocol)
 	if protocol != "TCP" && protocol != "UDP" {
 		return fmt.Errorf("invalid protocol: %s", protocol)
 	}
-	
+
 	log.Printf("UPnP: Deleting port mapping for %s:%d (%s)", "0.0.0.0", externalPort, protocol)
-	
+
 	err := c.deletePortMappingIGD(externalPort, protocol)
 	if err != nil {
 		log.Printf("UPnP: Failed to delete port mapping: %v", err)
 		return err
 	}
-	
+
 	log.Printf("UPnP: Successfully deleted port mapping")
 	return nil
 }
@@ -114,13 +114,13 @@ func (c *Client) GetExternalIP() (net.IP, error) {
 	if c.gatewayURL == "" {
 		return nil, ErrNoGatewayFound
 	}
-	
+
 	// Query external IP using IGD protocol
 	externalIP, err := c.getExternalIPIGD()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get external IP: %v", err)
 	}
-	
+
 	log.Printf("UPnP: External IP is %s", externalIP)
 	return externalIP, nil
 }
@@ -131,7 +131,7 @@ func getLocalIP() (net.IP, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	for _, addr := range addrs {
 		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
 			if ipnet.IP.To4() != nil {
@@ -139,7 +139,7 @@ func getLocalIP() (net.IP, error) {
 			}
 		}
 	}
-	
+
 	return nil, errors.New("no local IP address found")
 }
 
@@ -151,26 +151,26 @@ func (c *Client) discoverGateway() (string, error) {
 		"ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n" +
 		"MAN: \"ssdp:discover\"\r\n" +
 		"MX: 2\r\n\r\n"
-	
+
 	// Send to multicast address
 	addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
 	if err != nil {
 		return "", err
 	}
-	
+
 	conn, err := net.ListenUDP("udp4", nil)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-	
+
 	conn.SetDeadline(time.Now().Add(c.timeout))
-	
+
 	_, err = conn.WriteToUDP([]byte(searchMsg), addr)
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Wait for response
 	buf := make([]byte, 2048)
 	n, _, err := conn.ReadFromUDP(buf)
@@ -180,7 +180,7 @@ func (c *Client) discoverGateway() (string, error) {
 		}
 		return "", err
 	}
-	
+
 	// Parse response to extract LOCATION header
 	response := string(buf[:n])
 	lines := strings.Split(response, "\r\n")
@@ -190,7 +190,7 @@ func (c *Client) discoverGateway() (string, error) {
 			return location, nil
 		}
 	}
-	
+
 	return "", ErrNoGatewayFound
 }
 
@@ -203,12 +203,12 @@ func (c *Client) addPortMappingIGD(externalPort, internalPort int, protocol stri
 	// 1. Fetching the device description XML from c.gatewayURL
 	// 2. Parsing the XML to find the control URL for WANIPConnection or WANPPPConnection
 	// 3. Sending a SOAP AddPortMapping request to the control URL
-	
+
 	log.Printf("UPnP: Gateway discovered but IGD port mapping not implemented")
-	log.Printf("UPnP: Port mapping requested: external %d -> internal %s:%d (%s) - NOT APPLIED", 
+	log.Printf("UPnP: Port mapping requested: external %d -> internal %s:%d (%s) - NOT APPLIED",
 		externalPort, c.localAddr, internalPort, protocol)
 	log.Printf("UPnP: For full implementation, integrate github.com/huin/goupnp")
-	
+
 	// Return error to indicate feature is incomplete
 	return errors.New("UPnP port mapping not fully implemented - discovery only")
 }
@@ -232,19 +232,19 @@ func (c *Client) getExternalIPIGD() (net.IP, error) {
 // Returns true if successful, false otherwise (non-blocking, logs errors)
 func TryAddPortMapping(port int, protocol string, description string) bool {
 	client := NewClient(3 * time.Second)
-	
+
 	// Discover gateway
 	if err := client.Discover(); err != nil {
 		log.Printf("UPnP: Discovery failed (continuing without UPnP): %v", err)
 		return false
 	}
-	
+
 	// Add port mapping (basic implementation)
 	if err := client.AddPortMapping(port, port, protocol, description, 0); err != nil {
 		log.Printf("UPnP: Port mapping setup incomplete (continuing without UPnP): %v", err)
 		return false
 	}
-	
+
 	log.Printf("UPnP: Basic configuration attempted for %s/%d", protocol, port)
 	return true
 }
