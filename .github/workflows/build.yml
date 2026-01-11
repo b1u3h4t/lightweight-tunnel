@@ -1,34 +1,85 @@
 name: Build Lightweight Tunnel
 
 on:
-  workflow_dispatch: # 允许你手动点击按钮触发构建
+  workflow_dispatch:
   push:
-    branches: [ "main" ] # 当推送到 main 分支时自动触发
+    branches: [ "main" ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest # 使用 GitHub 提供的 Linux 服务器
+  build-linux:
+    runs-on: ubuntu-latest
 
     steps:
     # 1. 拉取代码
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 2. 配置 Go 环境 (根据截图要求 1.19+)
+    # 2. 配置 Go 环境
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21' # 这里用较新的稳定版，兼容 1.19
+        go-version: '1.21'
 
-    # 3. 编译 (完全照搬截图中的命令)
+    # 3. 编译
     - name: Build Binary
       run: |
-        # 截图中的核心编译命令
-        go build -v -o lightweight-tunnel ./cmd/lightweight-tunnel
+        go build -v -o lightweight-tunnel-linux-amd64 ./cmd/lightweight-tunnel
 
-    # 4. 上传打包结果 (让你能下载到编译好的文件)
+    # 4. 上传打包结果
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: lightweight-tunnel-linux-amd64
-        path: lightweight-tunnel
+        path: lightweight-tunnel-linux-amd64
+
+  build-macos-amd64:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Install dependencies
+      run: |
+        brew install libpcap
+
+    - name: Build Binary
+      run: |
+        CGO_ENABLED=1 go build -v -o lightweight-tunnel-macos-amd64 ./cmd/lightweight-tunnel
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lightweight-tunnel-macos-amd64
+        path: lightweight-tunnel-macos-amd64
+
+  build-macos-arm64:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Install dependencies
+      run: |
+        brew install libpcap
+
+    - name: Build Binary
+      run: |
+        CGO_ENABLED=1 GOARCH=arm64 go build -v -o lightweight-tunnel-macos-arm64 ./cmd/lightweight-tunnel
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lightweight-tunnel-macos-arm64
+        path: lightweight-tunnel-macos-arm64

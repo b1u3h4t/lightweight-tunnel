@@ -136,6 +136,70 @@ run-client: build
 	fi
 	sudo $(GOBIN)/$(BINARY_NAME) -m client -r $(SERVER_IP):9000 -t 10.0.0.2/24
 
+## install-service-macos: Install macOS launchd service (CONFIG_PATH=/path/to/config.json)
+install-service-macos:
+	@set -e; \
+	if [ -z "$(CONFIG_PATH)" ]; then \
+		echo "ERROR: CONFIG_PATH is required. Example: make install-service-macos CONFIG_PATH=/etc/lightweight-tunnel/config.json"; \
+		exit 1; \
+	fi; \
+	if [ "$(CONFIG_PATH)" = "${CONFIG_PATH#/}" ]; then \
+		echo "ERROR: CONFIG_PATH must be an absolute path."; \
+		exit 1; \
+	fi; \
+	if printf "%s" "$(CONFIG_PATH)" | grep -Eq '[[:space:]]'; then \
+		echo "ERROR: CONFIG_PATH must not contain whitespace."; \
+		exit 1; \
+	fi; \
+	if printf "%s" "$(CONFIG_PATH)" | grep -Eq "[;|&\\\`\\$$<>]"; then \
+		echo "ERROR: CONFIG_PATH contains unsupported characters ( ; | & \` $ < > )."; \
+		exit 1; \
+	fi; \
+	if [ -x "$(GOBIN)/$(BINARY_NAME)" ]; then \
+		echo "Using existing binary at $(GOBIN)/$(BINARY_NAME)"; \
+	elif command -v "$(GOCMD)" >/dev/null 2>&1; then \
+		echo "Binary not found, building $(BINARY_NAME)..."; \
+		$(MAKE) build; \
+	else \
+		echo "ERROR: $(GOBIN)/$(BINARY_NAME) not found and $(GOCMD) is not available. Please install Go or provide a prebuilt binary."; \
+		exit 1; \
+	fi; \
+	echo "Installing binary to $(INSTALL_BIN_DIR)..."; \
+	sudo install -m 755 $(GOBIN)/$(BINARY_NAME) $(INSTALL_BIN_DIR)/$(BINARY_NAME); \
+	echo "Creating contrib directory..."; \
+	mkdir -p contrib; \
+	if [ ! -f "contrib/$(BINARY_NAME).plist.template" ]; then \
+		echo "ERROR: contrib/$(BINARY_NAME).plist.template not found. Please create the template file first."; \
+		exit 1; \
+	fi; \
+	echo "Creating launchd plist for user mode..."; \
+	mkdir -p $(HOME)/Library/LaunchAgents; \
+	sed 's|{{EXEC_PATH}}|$(INSTALL_BIN_DIR)/$(BINARY_NAME)|g; s|{{CONFIG_PATH}}|$(CONFIG_PATH)|g' contrib/$(BINARY_NAME).plist.template > $(HOME)/Library/LaunchAgents/$(BINARY_NAME).plist; \
+	echo "Loading launchd service..."; \
+	launchctl load $(HOME)/Library/LaunchAgents/$(BINARY_NAME).plist; \
+	echo ""; \
+	echo "✅ Service installed successfully!"; \
+	echo ""; \
+	echo "Service information:"; \
+	echo "  - Plist file: $(HOME)/Library/LaunchAgents/$(BINARY_NAME).plist"; \
+	echo "  - Config file: $(CONFIG_PATH)"; \
+	echo "  - Log file: /tmp/lightweight-tunnel.log"; \
+	echo "  - Error log: /tmp/lightweight-tunnel.err"; \
+	echo ""; \
+	echo "To view logs:"; \
+	echo "  tail -f /tmp/lightweight-tunnel.log"; \
+	echo ""; \
+	echo "To uninstall:"; \
+	echo "  sudo make uninstall-service-macos"
+
+## uninstall-service-macos: Uninstall macOS launchd service
+uninstall-service-macos:
+	@echo "Unloading launchd service..."; \
+	launchctl unload $(HOME)/Library/LaunchAgents/$(BINARY_NAME).plist 2>/dev/null || true; \
+	rm -f $(HOME)/Library/LaunchAgents/$(BINARY_NAME).plist; \
+	echo "Service uninstalled. You can also remove the binary with:"; \
+	echo "  sudo rm $(INSTALL_BIN_DIR)/$(BINARY_NAME)"
+
 ## help: Show this help message
 help:
 	@echo "Usage: make [target]"

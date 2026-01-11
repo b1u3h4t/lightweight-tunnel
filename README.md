@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.19+-blue.svg)](https://golang.org)
-[![Platform](https://img.shields.io/badge/Platform-Linux-green.svg)](https://www.linux.org/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](https://www.linux.org/)
 
 [快速开始](#-快速开始) • [核心特性](#-核心特性) • [使用指南](#-使用指南) • [常见问题](#-常见问题) • [技术架构](#-技术架构)
 
@@ -206,11 +206,12 @@ Raw Socket → [IP Header (协议号=6) + 真实 TCP Header + 数据]
 
 | 项目 | 要求 |
 |-----|------|
-| 操作系统 | Linux (内核 2.6+) |
+| 操作系统 | Linux (内核 2.6+) 或 macOS 10.15+ (Catalina 或更高版本) |
 | 权限 | Root（Raw Socket 和 TUN 设备必需） |
 | 内存 | 最低 64MB，推荐 128MB+ |
 | 网络 | 至少一台设备需要公网 IP 或端口转发 |
 | Go 版本 | Go 1.19+（仅编译时需要） |
+| macOS 依赖 | libpcap (通过 Homebrew 安装) |
 
 ### 安装方法
 
@@ -284,6 +285,64 @@ sudo journalctl -u lightweight-tunnel-server -f
 # 如果服务正在运行，需手动重启
 sudo systemctl restart lightweight-tunnel-server
 ```
+
+#### 方法 5：macOS 安装
+
+在 macOS 上编译和安装：
+
+```bash
+# 安装依赖
+brew install libpcap
+
+# 克隆仓库
+git clone https://github.com/openbmx/lightweight-tunnel.git
+cd lightweight-tunnel
+
+# 编译（需要 CGO 支持）
+CGO_ENABLED=1 go build -o lightweight-tunnel ./cmd/lightweight-tunnel
+
+# 可选：安装到系统路径
+sudo cp lightweight-tunnel /usr/local/bin/
+
+# 验证
+./lightweight-tunnel -v
+```
+
+**Apple Silicon (M1/M2/M3)**:
+
+```bash
+# 指定 ARM64 架构编译
+CGO_ENABLED=1 GOARCH=arm64 go build -o lightweight-tunnel ./cmd/lightweight-tunnel
+```
+
+**macOS 安装为系统服务**:
+
+```bash
+# 编译
+make build
+
+# 安装 launchd 服务
+sudo make install-service-macos \
+  CONFIG_PATH=/etc/lightweight-tunnel/config-server.json
+
+# 配置文件权限（示例）
+sudo mkdir -p /etc/lightweight-tunnel
+sudo chown root:wheel /etc/lightweight-tunnel/*.json
+sudo chmod 600 /etc/lightweight-tunnel/*.json
+
+# 服务已自动加载并启动
+# 查看日志
+tail -f /tmp/lightweight-tunnel.log
+
+# 卸载服务
+sudo make uninstall-service-macos
+```
+
+**服务特性**：
+- ✅ 通过 launchd 管理
+- ✅ 自动启动和重启
+- ✅ 日志记录到 `/tmp/lightweight-tunnel.log`
+- ✅ 开机自启
 
 ### 快速测试
 
@@ -707,6 +766,23 @@ sudo firewall-cmd --reload
 # iptables
 sudo iptables -A INPUT -p tcp --dport 9000 -j ACCEPT
 sudo iptables -A INPUT -p udp --dport 9000 -j ACCEPT
+
+# macOS (pf)
+# 查看 pf 状态
+sudo pfctl -s info
+
+# 允许隧道流量（通常不需要，因为 Raw Socket 在 macOS 上自动工作）
+# 如果遇到连接问题，可以添加规则：
+cat > /tmp/pf-tunnel << EOF
+pass in quick proto tcp from any to any port 9000
+pass out quick proto tcp from any to any port 9000
+pass in quick proto udp from any to any port 19000
+pass out quick proto udp from any to any port 19000
+EOF
+sudo pfctl -f /tmp/pf-tunnel
+
+# 禁用 pf（测试用）
+sudo pfctl -d
 ```
 
 ---
@@ -913,6 +989,117 @@ ps aux | grep lightweight-tunnel
 
 # 查看 systemd 服务
 sudo systemctl status lightweight-tunnel-server
+
+# macOS 查看服务
+launchctl list | grep lightweight-tunnel
+tail -f /tmp/lightweight-tunnel.log
+```
+
+---
+
+## 🔧 macOS 特定问题
+
+#### Q10: macOS 编译失败 - "pcap.h not found"
+
+**错误信息**:
+```
+# github.com/google/gopacket/pcap
+./pcap.go:35:11: fatal error: pcap.h: No such file or directory
+```
+
+**解决方案**:
+```bash
+# 安装 libpcap
+brew install libpcap
+
+# 确保使用 CGO 编译
+CGO_ENABLED=1 go build ./cmd/lightweight-tunnel
+```
+
+#### Q11: macOS 权限错误 "operation not permitted"
+
+**错误信息**:
+```
+failed to create raw socket: operation not permitted (需要root权限)
+```
+
+**解决方案**:
+```bash
+# 使用 sudo 运行
+sudo ./lightweight-tunnel -m server -l 0.0.0.0:9000 -t 10.0.0.1/24
+
+# 或授予 capabilities（需要开发模式）
+sudo codesign --entitlements entitlements.plist --force --sign - ./lightweight-tunnel
+```
+
+#### Q12: macOS 上 Raw Socket 限制
+
+macOS 对 Raw Socket 有更严格的限制：
+
+- ⚠️ 内核可能处理部分 TCP 包，导致接收失败
+- ⚠️ 可能需要使用 libpcap 作为备选接收方式
+- ✅ 已自动实现 libpcap 回退机制
+
+**工作原理**:
+1. 首先尝试使用 Raw Socket 接收
+2. 如果失败（内核处理了包），自动切换到 libpcap
+3. libpcap 直接从网卡捕获原始数据包
+
+#### Q13: macOS 防火墙配置
+
+macOS 使用 pf (packet filter) 防火墙，而不是 iptables。
+
+**查看 pf 状态**:
+```bash
+sudo pfctl -s info
+```
+
+**允许隧道流量（如果需要）**:
+```bash
+# 创建临时规则文件
+cat > /etc/pf.anchors/lightweight-tunnel << EOF
+# 允许隧道端口 9000
+pass in quick proto tcp from any to any port 9000
+pass out quick proto tcp from any to any port 9000
+EOF
+
+# 加载规则
+sudo pfctl -e -f /etc/pf.anchors/lightweight-tunnel
+```
+
+**禁用防火墙（测试用）**:
+```bash
+sudo pfctl -d
+```
+
+#### Q14: macOS TUN 设备名称
+
+macOS 的 utun 设备名称由系统自动分配（utun0, utun1, 等）。
+
+**查看已分配的 utun 设备**:
+```bash
+ifconfig | grep utun
+```
+
+**指定设备名**:
+```bash
+# 可以指定起始编号，但系统可能分配不同的编号
+sudo ./lightweight-tunnel -m server -tun-name utun5
+```
+
+#### Q15: macOS 查看路由表
+
+macOS 使用 `route` 命令而不是 `ip route`。
+
+```bash
+# 查看路由表
+netstat -rn
+
+# 查看特定接口的路由
+netstat -rn -f inet | grep utun0
+
+# 添加路由（一般不需要手动操作）
+sudo route add -net 10.0.0.0/24 -interface utun0
 ```
 
 ---
@@ -1051,6 +1238,74 @@ go env -w GOPROXY=https://goproxy.cn,direct
 # 安装开发工具
 go install golang.org/x/tools/cmd/goimports@latest
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+```
+
+#### macOS 构建说明
+
+**依赖要求**:
+- Go 1.19 或更高版本
+- Xcode Command Line Tools（用于编译 C 代码）
+- libpcap（用于 libpcap 回退支持）
+
+**安装依赖**:
+```bash
+# 安装 Xcode Command Line Tools（如果尚未安装）
+xcode-select --install
+
+# 安装 libpcap
+brew install libpcap
+
+# 验证 libpcap
+brew list libpcap
+```
+
+**编译选项**:
+
+标准（Intel Mac）:
+```bash
+CGO_ENABLED=1 go build -o lightweight-tunnel ./cmd/lightweight-tunnel
+```
+
+Apple Silicon (M1/M2/M3):
+```bash
+CGO_ENABLED=1 GOARCH=arm64 go build -o lightweight-tunnel ./cmd/lightweight-tunnel
+```
+
+优化编译:
+```bash
+# 减小二进制大小
+CGO_ENABLED=1 go build -ldflags "-s -w" -o lightweight-tunnel ./cmd/lightweight-tunnel
+
+# 启用所有优化
+CGO_ENABLED=1 go build -ldflags "-s -w" -gcflags="-l=4" -o lightweight-tunnel ./cmd/lightweight-tunnel
+```
+
+**CGO 说明**:
+
+macOS 版本需要 CGO，因为：
+1. 创建 utun 设备需要调用 macOS 特定的 C API
+2. libpcap 绑定需要 CGO
+
+**常见编译问题**:
+
+| 问题 | 解决方案 |
+|-----|--------|
+| pcap.h not found | `brew install libpcap` |
+| linker command failed | `xcode-select --install` |
+
+**架构兼容性**:
+
+| 架构 | GOARCH | 设备 |
+|-----|--------|------|
+| Intel x86_64 | amd64 | Intel Mac (2019 及更早) |
+| Apple Silicon | arm64 | M1, M2, M3 Mac (2020 及之后) |
+
+**交叉编译**:
+
+在 Linux 上编译 macOS 版本（需要 macOS SDK）：
+```bash
+# 需要 osxcross 工具链
+CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=o64-clang go build ./cmd/lightweight-tunnel
 ```
 
 #### 贡献指南
