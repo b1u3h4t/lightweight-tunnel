@@ -2559,8 +2559,39 @@ func (t *Tunnel) routeUpdateLoop() {
 				// Clean stale routes
 				t.routingTable.CleanStaleRoutes(60 * time.Second)
 
-				// Routing stats logging removed to reduce log noise
-				// Only log when there are significant changes or errors
+				// Log routing stats with more detail
+				stats := t.routingTable.GetRouteStats()
+				log.Printf("Routing stats: %d peers, %d direct, %d relay, %d server",
+					stats["total_peers"], stats["direct_routes"],
+					stats["relay_routes"], stats["server_routes"])
+
+				// Log individual peer status for debugging
+				peers := t.routingTable.GetAllPeers()
+				for _, peer := range peers {
+					route := t.routingTable.GetRoute(peer.TunnelIP)
+					if route != nil {
+						var routeTypeStr string
+						switch route.Type {
+						case routing.RouteDirect:
+							routeTypeStr = "P2P-DIRECT"
+						case routing.RouteRelay:
+							routeTypeStr = "P2P-RELAY"
+						case routing.RouteServer:
+							routeTypeStr = "SERVER-RELAY"
+						}
+
+						connStatus := "disconnected"
+						if peer.Connected {
+							connStatus = "connected"
+							if peer.IsLocalConnection {
+								connStatus = "connected-local"
+							}
+						}
+
+						log.Printf("  Peer %s: route=%s quality=%d status=%s throughServer=%v",
+							peer.TunnelIP, routeTypeStr, route.Quality, connStatus, peer.ThroughServer)
+					}
+				}
 			}
 		}
 	}
