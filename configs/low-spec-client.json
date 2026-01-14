@@ -1,8 +1,8 @@
 {
   "mode": "client",
-  "remote_addr": "服务器IP:9000",
+  "remote_addr": "YOUR-SERVER-IP:9000",
   "tunnel_addr": "10.0.0.2/24",
-  "key": "请修改为您的强密钥-CHANGE-THIS-KEY",
+  "key": "CHANGE-THIS-TO-YOUR-STRONG-KEY",
   "mtu": 1200,
   "fec_data": 5,
   "fec_parity": 1,

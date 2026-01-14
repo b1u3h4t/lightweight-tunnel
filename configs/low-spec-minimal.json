@@ -2,7 +2,7 @@
   "mode": "server",
   "local_addr": "0.0.0.0:9000",
   "tunnel_addr": "10.0.0.1/24",
-  "key": "请修改为您的强密钥-CHANGE-THIS-KEY",
+  "key": "CHANGE-THIS-TO-YOUR-STRONG-KEY",
   "mtu": 1200,
   "fec_data": 5,
   "fec_parity": 1,
