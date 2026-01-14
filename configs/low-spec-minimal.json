@@ -1,0 +1,20 @@
+{
+  "mode": "server",
+  "local_addr": "0.0.0.0:9000",
+  "tunnel_addr": "10.0.0.1/24",
+  "key": "CHANGE-ME-use-openssl-rand-base64-32-to-generate",
+  "mtu": 1200,
+  "fec_data": 5,
+  "fec_parity": 1,
+  "send_queue_size": 500,
+  "recv_queue_size": 500,
+  "max_clients": 5,
+  "multi_client": true,
+  "client_isolation": false,
+  "p2p_enabled": false,
+  "enable_mesh_routing": false,
+  "enable_nat_detection": false,
+  "enable_xdp": true,
+  "enable_kernel_tune": true,
+  "keepalive": 15
+}

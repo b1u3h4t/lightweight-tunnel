@@ -29,3 +29,9 @@ go.work
 # OS files
 .DS_Store
 Thumbs.db
+
+# Config files (keep templates, ignore actual configs)
+config.json
+config.json.client
+*.config.json
+/etc/lightweight-tunnel/
