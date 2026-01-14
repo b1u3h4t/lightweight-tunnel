@@ -1,0 +1,17 @@
+{
+  "mode": "client",
+  "remote_addr": "服务器IP:9000",
+  "tunnel_addr": "10.0.0.2/24",
+  "key": "请修改为您的强密钥-CHANGE-THIS-KEY",
+  "mtu": 1200,
+  "fec_data": 5,
+  "fec_parity": 1,
+  "send_queue_size": 500,
+  "recv_queue_size": 500,
+  "p2p_enabled": false,
+  "enable_mesh_routing": false,
+  "enable_nat_detection": false,
+  "enable_xdp": true,
+  "enable_kernel_tune": true,
+  "keepalive": 15
+}
