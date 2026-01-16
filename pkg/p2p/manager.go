@@ -40,6 +40,9 @@ const (
 	FastKeepaliveDuration = 30 * time.Second
 	// ConnectionStaleTimeout is the timeout after which a connection is considered stale
 	ConnectionStaleTimeout = 60 * time.Second
+	// InitialConnectionTimeout is the timeout for establishing initial connection (never connected before)
+	// This is longer than stale timeout to allow sufficient time for NAT traversal
+	InitialConnectionTimeout = 120 * time.Second
 	// ConnectionStaleCheckThreshold is the fraction of stale timeout for quality fallback checks
 	ConnectionStaleCheckThreshold = 2 // Check at ConnectionStaleTimeout/2
 	// QualityCheckPoorThreshold is the quality score below which a connection is considered poor
@@ -57,6 +60,9 @@ const (
 	// MaxBackoffMultiplier is the maximum multiplier for exponential backoff (caps retry interval)
 	// Max interval = KeepaliveInterval * MaxBackoffMultiplier = 10s * 8 = 80s
 	MaxBackoffMultiplier = 8
+	// InitialBackoffMultiplier is the max backoff during initial connection phase
+	// Use lower multiplier to send handshakes more frequently when first connecting
+	InitialBackoffMultiplier = 3 // Max 30s interval during initial connection
 )
 
 // Connection represents a P2P UDP connection to a peer
@@ -79,6 +85,13 @@ type Connection struct {
 	nextHandshakeAttemptAt  time.Time     // When next handshake attempt is allowed (for rate limiting)
 	handshakeInProgress     bool          // Whether a handshake goroutine is currently running
 	mu                      sync.RWMutex  // Protects connection state
+}
+
+// IsInitialConnection returns true if this connection has never been successfully established
+func (c *Connection) IsInitialConnection() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connectionEstablishedAt.IsZero()
 }
 
 // Manager manages P2P connections
@@ -1024,15 +1037,32 @@ func (m *Manager) sendKeepalives() {
 			_, err := m.listener.WriteToUDP(handshakeMsg, conn.RemoteAddr)
 			if err != nil {
 				log.Printf("Continuous handshake send error to %s: %v", ipStr, err)
+			} else {
+				// Update LastSeen to reflect that we're actively attempting connection
+				// This prevents premature timeout during initial connection phase
+				// Note: LastSeen represents "last communication activity" (send or receive)
+				// not just "last received" - this is intentional for initial connection phase
+				peer.mu.Lock()
+				peer.LastSeen = now
+				peer.mu.Unlock()
 			}
 			
-			// Update rate limiting with exponential backoff: 10s, 20s, 40s, 80s (capped)
-			// Based on updated KeepaliveInterval (10s instead of 15s)
+			// Use adaptive backoff based on connection phase
+			// Initial connection phase: Use lower backoff (3x max = 30s)
+			// Later reconnection: Use higher backoff (8x max = 80s)
 			conn.mu.Lock()
 			conn.consecutiveFailures++
+			
+			// Determine max backoff based on whether this is initial connection or reconnection
+			maxBackoff := MaxBackoffMultiplier
+			if conn.connectionEstablishedAt.IsZero() {
+				// Never connected before - use faster retry (lower backoff cap)
+				maxBackoff = InitialBackoffMultiplier
+			}
+			
 			backoffMultiplier := 1 << uint(failures) // 2^failures
-			if backoffMultiplier > MaxBackoffMultiplier {
-				backoffMultiplier = MaxBackoffMultiplier
+			if backoffMultiplier > maxBackoff {
+				backoffMultiplier = maxBackoff
 			}
 			nextAttemptDelay := m.keepaliveInterval * time.Duration(backoffMultiplier)
 			conn.nextHandshakeAttemptAt = now.Add(nextAttemptDelay)
@@ -1042,9 +1072,22 @@ func (m *Manager) sendKeepalives() {
 		}
 		
 		// Check if connection is stale
-		if now.Sub(lastSeen) > ConnectionStaleTimeout {
-			log.Printf("P2P connection to %s is stale (last seen %v ago), attempting refresh", 
-				ipStr, now.Sub(lastSeen))
+		// Use different timeout for "never connected" vs "connection lost"
+		timeSinceLastSeen := now.Sub(lastSeen)
+		isInitialConnection := conn.IsInitialConnection()
+		
+		var staleThreshold time.Duration
+		if isInitialConnection {
+			// Never successfully connected - use longer timeout to allow NAT traversal
+			staleThreshold = InitialConnectionTimeout
+		} else {
+			// Previously connected - use normal timeout
+			staleThreshold = ConnectionStaleTimeout
+		}
+		
+		if timeSinceLastSeen > staleThreshold {
+			log.Printf("P2P connection to %s is stale (last seen %v ago, threshold %v), attempting refresh", 
+				ipStr, timeSinceLastSeen, staleThreshold)
 			
 			// Mark as disconnected and will trigger reconnection via continuous handshake
 			peer.SetConnected(false)
