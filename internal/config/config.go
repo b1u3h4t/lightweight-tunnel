@@ -52,29 +52,29 @@ type Config struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Mode:                 "server",
-		Transport:            "rawtcp", // Fixed to rawtcp for true TCP disguise
-		LocalAddr:            "0.0.0.0:9000",
-		RemoteAddr:           "",
-		TunnelAddr:           "10.0.0.1/24",
-		MTU:                  1400,
-		FECDataShards:        10,
-		FECParityShards:      3,
-		Timeout:              30,
-		KeepaliveInterval:    10,
-		SendQueueSize:        5000, // Increased from 1000 to prevent queue full errors
-		RecvQueueSize:        5000, // Increased from 1000 to handle burst traffic
-		TunName:              "",
-		Routes:               []string{},
-		ConfigPushInterval:   0,
-		MultiClient:          true,
-		MaxClients:           100,
-		ClientIsolation:      false,
-		P2PEnabled:           true,
-		P2PPort:              0, // Auto-select
-		EnableMeshRouting:    true,
-		MaxHops:              3,
-		RouteUpdateInterval:  30,
+		Mode:                "server",
+		Transport:           "rawtcp", // Fixed to rawtcp for true TCP disguise
+		LocalAddr:           "0.0.0.0:9000",
+		RemoteAddr:          "",
+		TunnelAddr:          "10.0.0.1/24",
+		MTU:                 1400,
+		FECDataShards:       10,
+		FECParityShards:     3,
+		Timeout:             30,
+		KeepaliveInterval:   5, // Reduced from 10 to 5 seconds for faster detection of connection issues
+		SendQueueSize:       5000, // Increased from 1000 to prevent queue full errors
+		RecvQueueSize:       5000, // Increased from 1000 to handle burst traffic
+		TunName:             "",
+		Routes:              []string{},
+		ConfigPushInterval:  0,
+		MultiClient:         true,
+		MaxClients:          100,
+		ClientIsolation:     false,
+		P2PEnabled:          true,
+		P2PPort:             0, // Auto-select
+		EnableMeshRouting:   true,
+		MaxHops:             3,
+		RouteUpdateInterval: 30,
 		P2PTimeout:           5,
 		EnableNATDetection:   true,
 		EnableXDP:            true,
@@ -118,7 +118,7 @@ func LoadConfig(filename string) (*Config, error) {
 		config.Timeout = 30
 	}
 	if config.KeepaliveInterval == 0 {
-		config.KeepaliveInterval = 10
+		config.KeepaliveInterval = 5 // Default to 5 seconds for aggressive connection health monitoring
 	}
 	if config.SendQueueSize == 0 {
 		config.SendQueueSize = 5000 // Increased default from 1000

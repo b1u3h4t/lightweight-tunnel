@@ -56,10 +56,11 @@ const (
 	QueueSendTimeout = 500 * time.Millisecond // Timeout for queue send operations to handle temporary congestion (increased from 100ms to reduce packet drops)
 
 	// Connection health constants
-	// IdleConnectionTimeout is the maximum time without receiving packets before considering connection dead
-	// Set to 6x the keepalive interval to allow for network delays and packet loss
-	// Increased from 30s to 60s to reduce unnecessary reconnections
-	IdleConnectionTimeout = 60 * time.Second // 6x default keepalive (10s)
+	// IdleConnectionTimeout is the maximum time without receiving packets before considering connection dead.
+	// This is critical for detecting "fake death" scenarios where ISPs silently drop packets without
+	// closing the TCP connection. Reduced to 15 seconds for faster detection and recovery.
+	// Set to 3x the keepalive interval to allow for some packet loss and network jitter.
+	IdleConnectionTimeout = 15 * time.Second // 3x default keepalive (5s)
 
 	// Rotation and advertisement timing
 	KeyRotationGracePeriod     = 15 * time.Second
