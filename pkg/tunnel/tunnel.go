@@ -64,8 +64,8 @@ const (
 	IdleConnectionTimeout = 15 * time.Second // 3x default keepalive (5s)
 
 	// Authentication constants
-	AuthenticationTimeout     = 5 * time.Second  // Timeout for authentication handshake
-	AuthenticationTimeWindow  = 300              // Authentication timestamp validity window in seconds (5 minutes)
+	AuthenticationTimeout     = 10 * time.Second  // Timeout for authentication handshake (increased from 5s to handle high-latency networks)
+	AuthenticationTimeWindow  = 300               // Authentication timestamp validity window in seconds (5 minutes)
 
 	// Rotation and advertisement timing
 	KeyRotationGracePeriod     = 15 * time.Second
@@ -306,12 +306,6 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 		log.Printf("使用配置的MTU: %d", cfg.MTU)
 	}
 
-	// Create FEC encoder/decoder
-	fecCodec, err := fec.NewFEC(cfg.FECDataShards, cfg.FECParityShards, cfg.MTU/cfg.FECDataShards)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create FEC: %v", err)
-	}
-
 	// Parse my tunnel IP
 	myIP, err := parseTunnelIP(cfg.TunnelAddr)
 	if err != nil {
@@ -353,6 +347,13 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 				cfg.MTU = maxSafeMTU
 			}
 		}
+	}
+
+	// Create FEC encoder/decoder AFTER MTU adjustment
+	// This ensures FEC shard size accounts for encryption overhead
+	fecCodec, err := fec.NewFEC(cfg.FECDataShards, cfg.FECParityShards, cfg.MTU/cfg.FECDataShards)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create FEC: %v", err)
 	}
 
 	packetBufSize := cfg.MTU + packetBufferSlack
@@ -836,61 +837,98 @@ type AuthenticationRequest struct {
 }
 
 // performClientAuthentication performs the authentication handshake with server
+// Includes retry logic for improved reliability on high-latency or lossy networks
 func (t *Tunnel) performClientAuthentication() error {
-	// Create authentication request
-	authReq := AuthenticationRequest{
-		Timestamp: time.Now().Unix(),
-		TunnelIP:  t.myTunnelIP.String(),
-	}
+	const maxRetries = 3
+	var lastErr error
 	
-	// Marshal to JSON
-	authData, err := json.Marshal(authReq)
-	if err != nil {
-		return fmt.Errorf("failed to marshal auth request: %v", err)
-	}
-	
-	authPacket := make([]byte, len(authData)+1)
-	authPacket[0] = PacketTypeAuth
-	copy(authPacket[1:], authData)
-	
-	// Encrypt the authentication packet (always encrypted for security)
-	t.cipherMux.RLock()
-	cipher := t.cipher
-	t.cipherMux.RUnlock()
-	
-	if cipher == nil {
-		return fmt.Errorf("cipher not available for authentication")
-	}
-	
-	encryptedAuth, err := cipher.Encrypt(authPacket)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt auth packet: %v", err)
-	}
-	
-	// Send authentication packet
-	if err := t.conn.WritePacket(encryptedAuth); err != nil {
-		return fmt.Errorf("failed to send auth packet: %v", err)
-	}
-	
-	// Wait for authentication response (with timeout)
-	// The response will be handled by netReader and sent to authResponseChan
-	if t.authResponseChan == nil {
-		return fmt.Errorf("auth response channel not initialized")
-	}
-	
-	select {
-	case err := <-t.authResponseChan:
-		if err != nil {
-			return err
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Authentication attempt %d/%d...", attempt+1, maxRetries)
+			// Wait before retry with exponential backoff: 1s, 2s, 4s
+			// Formula: 2^(attempt-1) seconds
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			time.Sleep(backoff)
 		}
-		// Authentication successful
-		t.authMux.Lock()
-		t.authenticated = true
-		t.authMux.Unlock()
-		return nil
-	case <-time.After(AuthenticationTimeout):
-		return fmt.Errorf("authentication timeout")
+		
+		// Create authentication request
+		authReq := AuthenticationRequest{
+			Timestamp: time.Now().Unix(),
+			TunnelIP:  t.myTunnelIP.String(),
+		}
+		
+		// Marshal to JSON
+		authData, err := json.Marshal(authReq)
+		if err != nil {
+			return fmt.Errorf("failed to marshal auth request: %v", err)
+		}
+		
+		authPacket := make([]byte, len(authData)+1)
+		authPacket[0] = PacketTypeAuth
+		copy(authPacket[1:], authData)
+		
+		// Encrypt the authentication packet (always encrypted for security)
+		t.cipherMux.RLock()
+		cipher := t.cipher
+		t.cipherMux.RUnlock()
+		
+		if cipher == nil {
+			return fmt.Errorf("cipher not available for authentication")
+		}
+		
+		encryptedAuth, err := cipher.Encrypt(authPacket)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt auth packet: %v", err)
+		}
+		
+		// Send authentication packet
+		if err := t.conn.WritePacket(encryptedAuth); err != nil {
+			lastErr = fmt.Errorf("failed to send auth packet: %v", err)
+			log.Printf("⚠️  Authentication send failed: %v", lastErr)
+			continue
+		}
+		
+		// Wait for authentication response (with timeout)
+		// The response will be handled by netReader and sent to authResponseChan
+		if t.authResponseChan == nil {
+			return fmt.Errorf("auth response channel not initialized")
+		}
+		
+		select {
+		case err := <-t.authResponseChan:
+			if err != nil {
+				lastErr = err
+				errMsg := err.Error()
+				log.Printf("⚠️  Authentication rejected: %v", err)
+				// Check if it's a permanent error (key mismatch) vs transient error
+				// Permanent errors: INVALID response, decryption errors, wrong key
+				// These indicate a configuration problem that won't be fixed by retrying
+				if strings.Contains(errMsg, "INVALID") || 
+				   strings.Contains(errMsg, "wrong key") ||
+				   strings.Contains(errMsg, "decryption") ||
+				   strings.Contains(errMsg, "cipher") {
+					return fmt.Errorf("authentication failed: incorrect encryption key - please verify both client and server use the same key")
+				}
+				// For other errors (like EXPIRED timestamp), retry may help
+				continue
+			}
+			// Authentication successful
+			t.authMux.Lock()
+			t.authenticated = true
+			t.authMux.Unlock()
+			return nil
+		case <-time.After(AuthenticationTimeout):
+			lastErr = fmt.Errorf("authentication timeout after %v - no response from server", AuthenticationTimeout)
+			log.Printf("⚠️  %v", lastErr)
+			continue
+		}
 	}
+	
+	// All retries failed
+	if lastErr != nil {
+		return fmt.Errorf("authentication failed after %d attempts: %v", maxRetries, lastErr)
+	}
+	return fmt.Errorf("authentication failed after %d attempts", maxRetries)
 }
 
 // reconnectToServer attempts to reconnect to the server with exponential backoff.
@@ -3813,6 +3851,18 @@ func (t *Tunnel) processFECShard(fecPacket []byte) ([]byte, error) {
 		return nil, fmt.Errorf("FEC shard index out of range: %d >= %d", shardIndex, totalShards)
 	}
 	
+	// Validate original size is reasonable (prevent memory exhaustion attacks)
+	// Maximum reasonable packet size is MTU + encryption overhead + some margin
+	const maxReasonablePacketSize = 65536 // 64KB should be more than enough
+	if originalSize <= 0 || originalSize > maxReasonablePacketSize {
+		return nil, fmt.Errorf("FEC original size invalid: %d (must be 1-%d)", originalSize, maxReasonablePacketSize)
+	}
+	
+	// Validate shard data is not empty
+	if len(shardData) == 0 {
+		return nil, fmt.Errorf("FEC shard data is empty")
+	}
+	
 	// Get or create FEC session
 	t.fecRecvMux.Lock()
 	session, exists := t.fecRecvSessions[sessionID]
@@ -3830,6 +3880,13 @@ func (t *Tunnel) processFECShard(fecPacket []byte) ([]byte, error) {
 		}
 		t.fecRecvSessions[sessionID] = session
 	}
+	
+	// Validate shard consistency
+	if session.originalSize != originalSize {
+		t.fecRecvMux.Unlock()
+		return nil, fmt.Errorf("FEC session %d: original size mismatch (%d vs %d)", sessionID, session.originalSize, originalSize)
+	}
+	
 	t.fecRecvMux.Unlock()
 	
 	// Add shard to session
