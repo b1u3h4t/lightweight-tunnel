@@ -96,27 +96,64 @@ func (f *FEC) Decode(shards [][]byte, shardPresent []bool) ([]byte, error) {
 		return nil, errors.New("not enough shards to reconstruct data")
 	}
 
-	// Simple XOR-based reconstruction for missing data shards
-	shardSize := len(shards[0])
+	// Determine shard size from any available shard
+	var shardSize int
+	for i := 0; i < len(shards); i++ {
+		if shardPresent[i] && shards[i] != nil && len(shards[i]) > 0 {
+			shardSize = len(shards[i])
+			break
+		}
+	}
+	if shardSize == 0 {
+		return nil, errors.New("no valid shards found to determine shard size")
+	}
+
+	// Count missing data shards
+	missingDataIdx := -1
+	missingDataCount := 0
 	for i := 0; i < f.dataShards; i++ {
 		if !shardPresent[i] {
-			// Reconstruct missing data shard using XOR
-			shards[i] = make([]byte, shardSize)
-			for j := 0; j < shardSize; j++ {
-				var val byte
-				// XOR all present data shards and first parity shard
-				for k := 0; k < f.dataShards; k++ {
-					if k != i && shardPresent[k] {
-						val ^= shards[k][j]
-					}
-				}
-				if shardPresent[f.dataShards] {
-					val ^= shards[f.dataShards][j]
-				}
-				shards[i][j] = val
-			}
-			shardPresent[i] = true
+			missingDataCount++
+			missingDataIdx = i
 		}
+	}
+
+	// Simple XOR-based reconstruction
+	// XOR FEC can only recover ONE missing data shard using ONE parity shard
+	if missingDataCount == 1 {
+		// Find any available parity shard
+		parityIdx := -1
+		for i := 0; i < f.parityShards; i++ {
+			if shardPresent[f.dataShards+i] {
+				parityIdx = f.dataShards + i
+				break
+			}
+		}
+
+		if parityIdx == -1 {
+			return nil, errors.New("missing data shard and no parity shards available")
+		}
+
+		// Reconstruct the single missing data shard using the parity shard
+		shards[missingDataIdx] = make([]byte, shardSize)
+		for j := 0; j < shardSize; j++ {
+			var val byte
+			// XOR all other (present) data shards
+			for k := 0; k < f.dataShards; k++ {
+				if k != missingDataIdx {
+					val ^= shards[k][j]
+				}
+			}
+			// XOR with the available parity shard
+			val ^= shards[parityIdx][j]
+			shards[missingDataIdx][j] = val
+		}
+		shardPresent[missingDataIdx] = true
+	} else if missingDataCount > 1 {
+		// With simple XOR parity, we cannot recover more than one missing data shard.
+		// Even if presentCount >= dataShards (meaning we have multiple parity shards),
+		// they are identical in this implementation and don't provide extra information.
+		return nil, errors.New("too many missing data shards for XOR FEC reconstruction")
 	}
 
 	// Reconstruct original data

@@ -47,6 +47,7 @@ func main() {
 	enableKernelTune := flag.Bool("kernel-tune", true, "Enable kernel tuning (TFO/BBR2) on startup")
 	enableSOCKS5 := flag.Bool("socks5", false, "Enable SOCKS5 proxy server")
 	socks5Addr := flag.String("socks5-addr", "0.0.0.0:1080", "SOCKS5 proxy listen address")
+	encryptAfterAuth := flag.Bool("encrypt-after-auth", false, "Skip per-packet encryption after authentication (lower CPU, assumes trusted network)")
 	showVersion := flag.Bool("v", false, "Show version")
 	generateConfig := flag.String("g", "", "Generate example config file")
 	// TLS flags removed: TLS over the UDP fake-TCP transport is not supported.
@@ -112,6 +113,7 @@ func main() {
 			EnableKernelTune:    *enableKernelTune,
 			EnableSOCKS5:        *enableSOCKS5,
 			SOCKS5Addr:          *socks5Addr,
+			EncryptAfterAuth:    *encryptAfterAuth,
 		}
 	}
 

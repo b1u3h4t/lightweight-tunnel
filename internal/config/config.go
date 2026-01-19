@@ -47,6 +47,12 @@ type Config struct {
 	// On-demand P2P configuration
 	RouteAdvertInterval  int `json:"route_advert_interval"`  // Route advertisement interval in seconds (default 300)
 	P2PKeepAliveInterval int `json:"p2p_keepalive_interval"` // P2P keepalive interval in seconds (default 25)
+
+	// Encryption mode configuration
+	// When true, only authenticate on connection establishment and skip per-packet encryption for data packets
+	// Control packets (keepalive, peer info, etc.) remain encrypted for security
+	// This reduces CPU overhead but assumes trusted network or relies on IP binding after authentication
+	EncryptAfterAuth bool `json:"encrypt_after_auth"` // Skip per-packet data encryption after authentication (default false)
 }
 
 // DefaultConfig returns a default configuration
@@ -62,8 +68,8 @@ func DefaultConfig() *Config {
 		FECParityShards:     3,
 		Timeout:             30,
 		KeepaliveInterval:   5, // Reduced from 10 to 5 seconds for faster detection of connection issues
-		SendQueueSize:       5000, // Increased from 1000 to prevent queue full errors
-		RecvQueueSize:       5000, // Increased from 1000 to handle burst traffic
+		SendQueueSize:       10000, // Increased to 10000 to prevent queue full errors during high bandwidth testing
+		RecvQueueSize:       10000, // Increased to 10000 to handle burst traffic during iperf3 testing
 		TunName:             "",
 		Routes:              []string{},
 		ConfigPushInterval:  0,
@@ -83,6 +89,7 @@ func DefaultConfig() *Config {
 		P2PKeepAliveInterval: 25,  // 25 seconds
 		EnableSOCKS5:         false,
 		SOCKS5Addr:           "0.0.0.0:1080",
+		EncryptAfterAuth:     false, // Default to per-packet encryption for security
 	}
 }
 
@@ -121,10 +128,10 @@ func LoadConfig(filename string) (*Config, error) {
 		config.KeepaliveInterval = 5 // Default to 5 seconds for aggressive connection health monitoring
 	}
 	if config.SendQueueSize == 0 {
-		config.SendQueueSize = 5000 // Increased default from 1000
+		config.SendQueueSize = 10000 // Increased default to handle high bandwidth
 	}
 	if config.RecvQueueSize == 0 {
-		config.RecvQueueSize = 5000 // Increased default from 1000
+		config.RecvQueueSize = 10000 // Increased default to handle high bandwidth
 	}
 	if config.MaxClients == 0 {
 		config.MaxClients = 100
