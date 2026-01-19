@@ -191,7 +191,8 @@ func TestDecodeLargeData(t *testing.T) {
 		t.Fatalf("Failed to encode: %v", err)
 	}
 
-	// Simulate missing first shard only (XOR-based FEC can recover 1 missing data shard)
+	// Simulate missing first shard only
+	// Note: The simple XOR-based FEC implementation can recover one missing data shard per parity shard available
 	shardPresent := make([]bool, len(shards))
 	for i := range shardPresent {
 		shardPresent[i] = true
