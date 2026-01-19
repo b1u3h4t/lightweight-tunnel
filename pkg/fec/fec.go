@@ -96,8 +96,20 @@ func (f *FEC) Decode(shards [][]byte, shardPresent []bool) ([]byte, error) {
 		return nil, errors.New("not enough shards to reconstruct data")
 	}
 
+	// Determine shard size from any available shard (not necessarily shards[0])
+	// This handles the case where shards arrive out of order
+	var shardSize int
+	for i := 0; i < len(shards); i++ {
+		if shardPresent[i] && len(shards[i]) > 0 {
+			shardSize = len(shards[i])
+			break
+		}
+	}
+	if shardSize == 0 {
+		return nil, errors.New("no valid shards found to determine shard size")
+	}
+
 	// Simple XOR-based reconstruction for missing data shards
-	shardSize := len(shards[0])
 	for i := 0; i < f.dataShards; i++ {
 		if !shardPresent[i] {
 			// Reconstruct missing data shard using XOR
