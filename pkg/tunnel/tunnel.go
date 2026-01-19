@@ -415,6 +415,7 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 		t.sendQueue = make(chan []byte, cfg.SendQueueSize)
 		t.recvQueue = make(chan []byte, cfg.RecvQueueSize)
 		// Initialize auth response channel for encrypt_after_auth mode
+		// Only initialize if a key is provided, since authentication requires encryption
 		if cfg.EncryptAfterAuth && cfg.Key != "" {
 			t.authResponseChan = make(chan error, 1)
 		}
@@ -1470,23 +1471,30 @@ func (t *Tunnel) netReader() {
 			}
 		case PacketTypeAuthResponse:
 			// Handle authentication response (client mode)
-			if t.config.EncryptAfterAuth && t.authResponseChan != nil {
-				responseData := string(payload)
-				if responseData != "OK" {
-					select {
-					case t.authResponseChan <- fmt.Errorf("authentication rejected: %s", responseData):
-					default:
-						log.Printf("⚠️  Failed to send auth error to channel (channel full or closed): %s", responseData)
-					}
-				} else {
-					select {
-					case t.authResponseChan <- nil:
-					default:
-						log.Printf("⚠️  Failed to send auth success to channel (channel full or closed)")
-					}
-				}
-			} else if t.config.EncryptAfterAuth {
+			// This should only be received in encrypt_after_auth mode
+			if !t.config.EncryptAfterAuth {
+				log.Printf("⚠️  Received unexpected auth response (encrypt_after_auth is disabled)")
+				break
+			}
+			
+			if t.authResponseChan == nil {
 				log.Printf("⚠️  Received auth response but channel is nil - this shouldn't happen")
+				break
+			}
+			
+			responseData := string(payload)
+			if responseData != "OK" {
+				select {
+				case t.authResponseChan <- fmt.Errorf("authentication rejected: %s", responseData):
+				default:
+					log.Printf("⚠️  Failed to send auth error to channel (channel full or closed): %s", responseData)
+				}
+			} else {
+				select {
+				case t.authResponseChan <- nil:
+				default:
+					log.Printf("⚠️  Failed to send auth success to channel (channel full or closed)")
+				}
 			}
 		case PacketTypeKeepalive:
 			// Keepalive received, no action needed
