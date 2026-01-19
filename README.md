@@ -90,6 +90,36 @@ ping 10.0.0.1  # 在客户端 ping 服务器
 ping 10.0.0.2  # 在服务端 ping 客户端
 ```
 
+### 验证模式（低 CPU 开销）
+
+适用于可信网络或已有应用层加密（HTTPS/TLS）的场景：
+
+**服务端**
+```bash
+sudo ./lightweight-tunnel \
+  -m server \
+  -l 0.0.0.0:9000 \
+  -t 10.0.0.1/24 \
+  -k "your-secret-key" \
+  -encrypt-after-auth
+```
+
+**客户端**
+```bash
+sudo ./lightweight-tunnel \
+  -m client \
+  -r <服务器IP>:9000 \
+  -t 10.0.0.2/24 \
+  -k "your-secret-key" \
+  -encrypt-after-auth
+```
+
+**特点**：
+- 连接时通过加密密钥验证身份
+- 验证通过后，数据包不加密（控制包仍加密）
+- CPU 开销大幅降低，适合高流量场景
+- 延迟更低，吞吐量更高
+
 ### 低配服务器部署（1核1G）
 
 使用优化配置模板：
@@ -192,7 +222,15 @@ sudo ./lightweight-tunnel -c configs/low-spec-client.json
 -xdp                  启用 XDP 加速（默认 true）
 -kernel-tune          启用内核调优（默认 true）
 -nat-detection        启用 NAT 检测（默认 true）
+-encrypt-after-auth   仅验证模式（默认 false）
 ```
+
+**加密模式说明**
+- 默认模式（`-encrypt-after-auth=false`）：每个数据包都加密，最安全但 CPU 开销较高
+- 验证模式（`-encrypt-after-auth=true`）：连接时验证身份，之后数据包不加密
+  - ✅ 优势：CPU 开销低，传输速度快，延迟更低
+  - ⚠️  注意：数据包不加密，适用于可信网络或已有其他加密层（如 TLS）
+  - 🔒 安全：控制包仍加密，初始验证使用密钥，IP 绑定防止欺骗
 
 **服务端专用**
 ```

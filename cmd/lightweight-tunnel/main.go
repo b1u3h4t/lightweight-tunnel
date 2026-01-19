@@ -45,6 +45,7 @@ func main() {
 	enableNATDetection := flag.Bool("nat-detection", true, "Enable automatic NAT type detection")
 	enableXDP := flag.Bool("xdp", true, "Enable eBPF/XDP-style fast path classification to reduce CPU cost")
 	enableKernelTune := flag.Bool("kernel-tune", true, "Enable kernel tuning (TFO/BBR2) on startup")
+	encryptAfterAuth := flag.Bool("encrypt-after-auth", false, "Skip per-packet encryption after authentication (lower CPU, assumes trusted network)")
 	showVersion := flag.Bool("v", false, "Show version")
 	generateConfig := flag.String("g", "", "Generate example config file")
 	// TLS flags removed: TLS over the UDP fake-TCP transport is not supported.
@@ -108,6 +109,7 @@ func main() {
 			P2PTimeout:          5,
 			EnableXDP:           *enableXDP,
 			EnableKernelTune:    *enableKernelTune,
+			EncryptAfterAuth:    *encryptAfterAuth,
 		}
 	}
 

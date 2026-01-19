@@ -43,6 +43,12 @@ type Config struct {
 	// On-demand P2P configuration
 	RouteAdvertInterval  int `json:"route_advert_interval"`  // Route advertisement interval in seconds (default 300)
 	P2PKeepAliveInterval int `json:"p2p_keepalive_interval"` // P2P keepalive interval in seconds (default 25)
+
+	// Encryption mode configuration
+	// When true, only authenticate on connection establishment and skip per-packet encryption for data packets
+	// Control packets (keepalive, peer info, etc.) remain encrypted for security
+	// This reduces CPU overhead but assumes trusted network or relies on IP binding after authentication
+	EncryptAfterAuth bool `json:"encrypt_after_auth"` // Skip per-packet data encryption after authentication (default false)
 }
 
 // DefaultConfig returns a default configuration
@@ -77,6 +83,7 @@ func DefaultConfig() *Config {
 		EnableKernelTune:     true,
 		RouteAdvertInterval:  300, // 5 minutes
 		P2PKeepAliveInterval: 25,  // 25 seconds
+		EncryptAfterAuth:     false, // Default to per-packet encryption for security
 	}
 }
 
