@@ -61,9 +61,14 @@ func NewConnRaw(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort ui
 
 	// Create iptables manager and add rules
 	iptablesMgr := iptables.NewIPTablesManager()
-	if err := iptablesMgr.AddRuleForPort(localPort, !isClient); err != nil {
+	if isClient {
+		err = iptablesMgr.AddRuleForConnection(localIP.String(), localPort, remoteIP.String(), remotePort, false)
+	} else {
+		err = iptablesMgr.AddRuleForPort(localPort, true)
+	}
+	if err != nil {
 		rawSock.Close()
-		return nil, fmt.Errorf("failed to add iptables rule: %v", err)
+		return nil, fmt.Errorf("failed to add RST suppression rule: %v", err)
 	}
 
 	conn := &ConnRaw{
