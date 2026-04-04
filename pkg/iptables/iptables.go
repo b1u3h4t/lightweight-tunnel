@@ -3,6 +3,7 @@ package iptables
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 )
 
 const darwinPFAnchorRoot = "lightweight-tunnel"
+const darwinPFAnchorDirective = "anchor \"lightweight-tunnel/*\""
+const darwinPFConfPath = "/etc/pf.conf"
 
 // IPTablesManager manages iptables rules for raw socket TCP
 type IPTablesManager struct {
@@ -216,6 +219,9 @@ func CheckIPTablesAvailable() error {
 		if !darwinPFEnabled(string(output)) {
 			return fmt.Errorf("pf is disabled; enable it first with 'sudo pfctl -E' before starting rawtcp on macOS")
 		}
+		if err := ensureDarwinPFAnchorLinked(); err != nil {
+			return err
+		}
 		log.Printf("Running on macOS: PF available for raw socket RST suppression")
 		return nil
 	}
@@ -230,6 +236,9 @@ func CheckIPTablesAvailable() error {
 
 func (m *IPTablesManager) addDarwinRule(anchor string, rule string) error {
 	if err := ensureDarwinPFEnabled(); err != nil {
+		return err
+	}
+	if err := ensureDarwinPFAnchorLinked(); err != nil {
 		return err
 	}
 
@@ -258,6 +267,66 @@ func ensureDarwinPFEnabled() error {
 		return nil
 	}
 	return fmt.Errorf("macOS PF is disabled; run 'sudo pfctl -E' and restart lightweight-tunnel")
+}
+
+func ensureDarwinPFAnchorLinked() error {
+	linked, err := darwinPFAnchorLinked()
+	if err != nil {
+		return err
+	}
+	if linked {
+		return nil
+	}
+	return fmt.Errorf("macOS PF anchor '%s' is not linked in the active ruleset; run 'sudo lightweight-tunnel -install-macos-pf' once, then restart lightweight-tunnel", darwinPFAnchorRoot)
+}
+
+func darwinPFAnchorLinked() (bool, error) {
+	cmd := exec.Command("pfctl", "-sr")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect active macOS PF ruleset: %v, output: %s", err, output)
+	}
+	return darwinPFAnchorLinkedFromRules(string(output)), nil
+}
+
+func darwinPFAnchorLinkedFromRules(rules string) bool {
+	return strings.Contains(rules, darwinPFAnchorDirective) || strings.Contains(rules, fmt.Sprintf("anchor \"%s\"", darwinPFAnchorRoot))
+}
+
+func InstallDarwinPFAnchor() error {
+	if !isMacOS() {
+		return fmt.Errorf("macOS PF bootstrap is only supported on darwin")
+	}
+
+	content, err := os.ReadFile(darwinPFConfPath)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", darwinPFConfPath, err)
+	}
+
+	conf := string(content)
+	if !strings.Contains(conf, darwinPFAnchorDirective) {
+		updated := conf
+		if !strings.HasSuffix(updated, "\n") {
+			updated += "\n"
+		}
+		updated += darwinPFAnchorDirective + "\n"
+
+		if err := os.WriteFile(darwinPFConfPath, []byte(updated), 0644); err != nil {
+			return fmt.Errorf("failed to update %s: %w", darwinPFConfPath, err)
+		}
+	}
+
+	cmd := exec.Command("pfctl", "-f", darwinPFConfPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to reload %s: %v, output: %s", darwinPFConfPath, err, output)
+	}
+
+	if err := ensureDarwinPFAnchorLinked(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func darwinPFRuleForPort(port uint16) string {

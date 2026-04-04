@@ -202,6 +202,19 @@ ip route get 10.233.0.1
 
 如果 macOS 客户端已经能握手成功，但 `ping 10.233.0.1` 仍然高丢包，先不要改 FEC。保持现有 `fec_data` / `fec_parity` 不变，优先检查本机是否在向 rawtcp 流量发 TCP RST。
 
+首次使用前先做一次 PF bootstrap：
+
+```bash
+sudo ./lightweight-tunnel -install-macos-pf
+sudo pfctl -sr | grep lightweight-tunnel
+```
+
+必须先看到：
+
+```text
+anchor "lightweight-tunnel/*" all
+```
+
 操作步骤：
 
 ```bash

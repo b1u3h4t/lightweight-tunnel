@@ -42,3 +42,20 @@ func TestDarwinPFEnabled(t *testing.T) {
 		t.Fatal("expected disabled status to be rejected")
 	}
 }
+
+func TestDarwinPFAnchorLinked(t *testing.T) {
+	active := "scrub-anchor \"com.apple/*\" all\nanchor \"lightweight-tunnel/*\" all\n"
+	if !darwinPFAnchorLinkedFromRules(active) {
+		t.Fatal("expected lightweight-tunnel wildcard anchor to be detected")
+	}
+
+	legacy := "anchor \"lightweight-tunnel\" all\n"
+	if !darwinPFAnchorLinkedFromRules(legacy) {
+		t.Fatal("expected legacy lightweight-tunnel anchor to be detected")
+	}
+
+	missing := "anchor \"com.apple/*\" all\n"
+	if darwinPFAnchorLinkedFromRules(missing) {
+		t.Fatal("expected missing lightweight-tunnel anchor to be rejected")
+	}
+}

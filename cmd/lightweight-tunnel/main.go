@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/openbmx/lightweight-tunnel/internal/config"
+	"github.com/openbmx/lightweight-tunnel/pkg/iptables"
 	"github.com/openbmx/lightweight-tunnel/pkg/tunnel"
 )
 
@@ -52,6 +53,7 @@ func main() {
 	encryptAfterAuth := flag.Bool("encrypt-after-auth", false, "Skip per-packet encryption after authentication (lower CPU, assumes trusted network)")
 	showVersion := flag.Bool("v", false, "Show version")
 	generateConfig := flag.String("g", "", "Generate example config file")
+	installMacOSPF := flag.Bool("install-macos-pf", false, "Install lightweight-tunnel PF anchor into /etc/pf.conf on macOS")
 	// TLS flags removed: TLS over the UDP fake-TCP transport is not supported.
 	key := flag.String("k", "", "Encryption key for tunnel traffic (required for secure communication)")
 
@@ -69,6 +71,15 @@ func main() {
 			log.Fatalf("Failed to generate config: %v", err)
 		}
 		fmt.Printf("Generated config file: %s\n", *generateConfig)
+		return
+	}
+
+	if *installMacOSPF {
+		if err := iptables.InstallDarwinPFAnchor(); err != nil {
+			log.Fatalf("Failed to install macOS PF anchor: %v", err)
+		}
+		fmt.Println("Installed macOS PF anchor for lightweight-tunnel.")
+		fmt.Println("Next: restart lightweight-tunnel, then verify with 'sudo pfctl -sr | grep lightweight-tunnel'.")
 		return
 	}
 

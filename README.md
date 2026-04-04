@@ -880,6 +880,26 @@ Raw TCP 在 macOS 上不只是“放行 9000 端口”这么简单。当前必�
 
 如果你已经有客户端在线，**不要因为排障去改 FEC**。先保持现有 `fec_data` / `fec_parity` 不变，只处理 PF。
 
+**首次使用前，先做一次 PF bootstrap**:
+
+```bash
+sudo ./lightweight-tunnel -install-macos-pf
+```
+
+验证主 ruleset 里已经挂上了 anchor：
+
+```bash
+sudo pfctl -sr | grep lightweight-tunnel
+```
+
+应看到：
+
+```text
+anchor "lightweight-tunnel/*" all
+```
+
+如果这一步没有成功，后续 `pfctl -a lightweight-tunnel/... -f -` 只会把规则写进未激活的 leaf anchor，PF 不会真正匹配这些规则。
+
 **操作步骤（不关闭 FEC）**:
 
 1. 查看当前 PF 状态：
@@ -920,7 +940,7 @@ EOF
 
 把上面的 `22535` 替换成你的实际本地源端口。
 
-4. 验证规则已经生效：
+4. 验证规则已经加载到 leaf anchor：
 
 ```bash
 sudo pfctl -a lightweight-tunnel/client-22535 -s rules
@@ -930,6 +950,12 @@ sudo pfctl -a lightweight-tunnel/client-22535 -s rules
 
 ```text
 block drop out quick proto tcp from any port 22535 to 49.232.146.200 port 9000 flags R/R
+```
+
+再确认主 ruleset 也确实引用了 `lightweight-tunnel`：
+
+```bash
+sudo pfctl -sr | grep lightweight-tunnel
 ```
 
 5. 重启客户端，再次抓包确认外网网卡上不再持续出现客户端自己发出的 `Flags [R]`：
@@ -950,7 +976,10 @@ sudo pfctl -a lightweight-tunnel/client-22535 -F rules
 
 - 这条 PF 规则只影响指定的本地源端口和服务端 `49.232.146.200:9000`，不会改你的 FEC。
 - 每次客户端重连后，本地源端口可能变化。如果端口变了，需要按新的端口重新加载规则。
-- 当前仓库里的 macOS 支持会在启动时检查 PF 是否已启用；如果 PF 是 Disabled，会直接报错提示先执行 `sudo pfctl -E`。
+- 当前仓库里的 macOS 支持会在启动时同时检查：
+  - PF 是否已启用
+  - `lightweight-tunnel/*` 是否已挂进 active PF ruleset
+- 如果只启用了 PF 但没有做 bootstrap，程序会直接报错，而不是继续假装“规则已生效”。
 
 #### Q14: macOS TUN 设备名称
 
