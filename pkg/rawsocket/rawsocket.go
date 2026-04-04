@@ -579,19 +579,13 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 
 // SetReadTimeout sets read timeout for the socket
 func (rs *RawSocket) SetReadTimeout(sec, usec int64) error {
-	tv := syscall.Timeval{
-		Sec:  sec,
-		Usec: usec,
-	}
+	tv := syscall.NsecToTimeval((sec*1e6 + usec) * 1000)
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 }
 
 // SetWriteTimeout sets write timeout for the socket
 func (rs *RawSocket) SetWriteTimeout(sec, usec int64) error {
-	tv := syscall.Timeval{
-		Sec:  sec,
-		Usec: usec,
-	}
+	tv := syscall.NsecToTimeval((sec*1e6 + usec) * 1000)
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
 }
 

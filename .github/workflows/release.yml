@@ -36,20 +36,12 @@ jobs:
         include:
           - goarch: amd64
             suffix: linux-amd64
+            cc: gcc
+            pkg: ""
           - goarch: arm64
             suffix: linux-arm64
-          - goarch: arm
-            goarm: '7'
-            suffix: linux-armv7
-          - goarch: arm
-            goarm: '6'
-            suffix: linux-armv6
-          - goarch: '386'
-            suffix: linux-386
-          - goarch: mips
-            suffix: linux-mips
-          - goarch: mipsle
-            suffix: linux-mipsle
+            cc: aarch64-linux-gnu-gcc
+            pkg: "gcc-aarch64-linux-gnu libpcap-dev:arm64"
 
     steps:
       - uses: actions/checkout@v4
@@ -59,12 +51,23 @@ jobs:
         with:
           go-version: '1.24'
 
+      - name: Install cross-compile deps
+        run: |
+          if [ "${{ matrix.goarch }}" = "arm64" ]; then
+            sudo dpkg --add-architecture arm64
+            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          fi
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev ${{ matrix.pkg }}
+
       - name: Build
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
+          CC: ${{ matrix.cc }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           OUTPUT="lightweight-tunnel-${{ matrix.suffix }}"
@@ -83,17 +86,15 @@ jobs:
 
   build-macos:
     needs: test
+    runs-on: macos-14
     strategy:
       matrix:
         include:
-          - runner: macos-13
-            goarch: amd64
+          - goarch: amd64
             suffix: macos-amd64
-          - runner: macos-14
-            goarch: arm64
+          - goarch: arm64
             suffix: macos-arm64
 
-    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -160,11 +161,6 @@ jobs:
             echo "|----------|-------------|------|"
             echo "| Linux | amd64 | \`lightweight-tunnel-linux-amd64.tar.gz\` |"
             echo "| Linux | arm64 | \`lightweight-tunnel-linux-arm64.tar.gz\` |"
-            echo "| Linux | armv7 | \`lightweight-tunnel-linux-armv7.tar.gz\` |"
-            echo "| Linux | armv6 | \`lightweight-tunnel-linux-armv6.tar.gz\` |"
-            echo "| Linux | 386 | \`lightweight-tunnel-linux-386.tar.gz\` |"
-            echo "| Linux | mips | \`lightweight-tunnel-linux-mips.tar.gz\` |"
-            echo "| Linux | mipsle | \`lightweight-tunnel-linux-mipsle.tar.gz\` |"
             echo "| macOS | amd64 (Intel) | \`lightweight-tunnel-macos-amd64.tar.gz\` |"
             echo "| macOS | arm64 (Apple Silicon) | \`lightweight-tunnel-macos-arm64.tar.gz\` |"
             echo ""
