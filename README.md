@@ -198,6 +198,75 @@ ping 10.0.0.1  # 在客户端 ping 服务器
 ping 10.0.0.2  # 在服务端 ping 客户端
 ```
 
+#### 场景 1.1：NAT 云主机 / EIP / 公网映射部署
+
+如果你的云主机在控制台有公网 IP，但系统网卡实际只有内网 IPv4，比如：
+
+- 公网地址：`49.232.146.200`
+- 实例网卡地址：`10.2.0.12`
+
+那么服务端不要只写 `local_addr`，还需要额外指定：
+
+- `local_addr`：客户端真正访问的公网地址和端口
+- `reply_source_ip`：实例网卡上的内网 IPv4 地址
+
+这是 Raw TCP 模式在云 NAT / EIP 环境里最重要的配置。否则服务端可能收到 SYN，却回不出客户端认可的 SYN-ACK。
+
+**服务端配置文件示例**：
+
+```json
+{
+  "mode": "server",
+  "local_addr": "49.232.146.200:9000",
+  "reply_source_ip": "10.2.0.12",
+  "tunnel_addr": "100.0.0.1/24",
+  "key": "your-secret-key",
+  "mtu": 0,
+  "enable_nat_detection": true,
+  "enable_xdp": true,
+  "enable_kernel_tune": true
+}
+```
+
+**服务端命令行示例**：
+
+```bash
+sudo ./lightweight-tunnel \
+  -m server \
+  -l 49.232.146.200:9000 \
+  --reply-source-ip 10.2.0.12 \
+  -t 100.0.0.1/24 \
+  -k "your-secret-key" \
+  -mtu 0
+```
+
+**客户端**：
+
+```bash
+sudo ./lightweight-tunnel \
+  -m client \
+  -r 49.232.146.200:9000 \
+  -t 100.0.0.20/24 \
+  -k "your-secret-key" \
+  -mtu 0
+```
+
+**服务端如何验证是否配置正确**：
+
+```bash
+sudo tcpdump -nn -i eth0 'tcp port 9000'
+```
+
+客户端连接时，应看到类似：
+
+```text
+<client-ip>.<port> > 10.2.0.12.9000: Flags [S]
+10.2.0.12.9000 > <client-ip>.<port>: Flags [S.]
+<client-ip>.<port> > 10.2.0.12.9000: Flags [.]
+```
+
+注意：Raw TCP 模式是 raw socket，不是常规 TCP listen socket，所以不要用 `ss -lntp | grep 9000` 或 `netstat -tulnp | grep 9000` 判断服务端是否“监听成功”。
+
 ### 验证模式（低 CPU 开销）
 
 适用于可信网络或已有应用层加密（HTTPS/TLS）的场景：

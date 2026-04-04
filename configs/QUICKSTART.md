@@ -115,8 +115,40 @@ top -p $(pgrep lightweight-tunnel)
 # 查看网络流量
 sudo iftop -i tun0
 
-# 查看连接状态（服务端）
-sudo netstat -tulnp | grep 9000
+# rawtcp 模式不要用 netstat/ss 看 9000 是否 LISTEN
+# 应直接抓物理网卡上的 TCP/9000 收发
+sudo tcpdump -nn -i eth0 'tcp port 9000'
+```
+
+## NAT 云主机 / EIP / 公网映射说明
+
+如果云主机公网 IP 不是直接挂在网卡上，而是通过云厂商 NAT / EIP 映射到实例，请这样配置服务端：
+
+- `local_addr`: 公网地址，例如 `49.232.146.200:9000`
+- `reply_source_ip`: 实例网卡内网地址，例如 `10.2.0.12`
+
+示例：
+
+```json
+{
+  "mode": "server",
+  "local_addr": "49.232.146.200:9000",
+  "reply_source_ip": "10.2.0.12",
+  "tunnel_addr": "100.0.0.1/24",
+  "key": "your-strong-password-here-32-chars-minimum",
+  "mtu": 0,
+  "enable_nat_detection": true,
+  "enable_xdp": true,
+  "enable_kernel_tune": true
+}
+```
+
+验证时请抓 `eth0`，看到下面这种握手才算配置生效：
+
+```text
+<client-ip>.<port> > 10.2.0.12.9000: Flags [S]
+10.2.0.12.9000 > <client-ip>.<port>: Flags [S.]
+<client-ip>.<port> > 10.2.0.12.9000: Flags [.]
 ```
 
 ## 性能调优建议

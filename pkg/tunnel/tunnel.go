@@ -1399,9 +1399,6 @@ func (t *Tunnel) tunReader() {
 		// Check if packet is IPv4 (skip non-IPv4 packets like IPv6)
 		version := buf[packetStart] >> 4
 		if version != IPv4Version {
-			if n+packetStart < 200 {
-				log.Printf("⚠️  Not IPv4 packet: version=%d (first byte: 0x%02x)", version, buf[packetStart])
-			}
 			continue
 		}
 

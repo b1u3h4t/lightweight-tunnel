@@ -138,10 +138,13 @@ A: 可以。尝试：
 
 如果需要更细粒度的控制，可以手动调整：
 
+如果服务端跑在云主机上，公网 IP 通过 EIP / SNAT / DNAT 映射到实例，请额外填写 `reply_source_ip`，值为实例网卡上的内网 IPv4。
+
 ```json
 {
   "mode": "server",
-  "local_addr": "0.0.0.0:9000",
+  "local_addr": "49.232.146.200:9000",
+  "reply_source_ip": "10.2.0.12",
   "tunnel_addr": "10.0.0.1/24",
   "key": "your-strong-key-here",
   "mtu": 1200,
@@ -160,6 +163,12 @@ A: 可以。尝试：
   "enable_xdp": true,
   "enable_kernel_tune": true
 }
+```
+
+Raw TCP 模式不会在 `ss -lntp` 或 `netstat -tulnp` 里显示常规 `LISTEN 9000`。排查时请直接抓物理网卡：
+
+```bash
+sudo tcpdump -nn -i eth0 'tcp port 9000'
 ```
 
 ## 参考资料
