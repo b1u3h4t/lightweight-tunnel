@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -44,6 +45,10 @@ type RawSocket struct {
 	pcapHandle *pcap.Handle
 	pcapMu     sync.Mutex
 	pcapPacket chan []byte
+
+	// Drop counter for observability
+	pcapDropCount uint64
+	recvDropCount uint64
 }
 
 // NewRawSocket creates a new raw socket
@@ -99,6 +104,21 @@ func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort 
 		return nil, fmt.Errorf("failed to set non-blocking: %v", err)
 	}
 
+	// Increase kernel socket buffers to reduce packet loss under high throughput
+	const socketBufSize = 4 * 1024 * 1024 // 4 MB
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, socketBufSize); err != nil {
+		log.Printf("⚠️  Failed to set SO_RCVBUF on recv socket: %v (using kernel default)", err)
+	}
+	if sendFd != fd {
+		if err := syscall.SetsockoptInt(sendFd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, socketBufSize); err != nil {
+			log.Printf("⚠️  Failed to set SO_SNDBUF on send socket: %v (using kernel default)", err)
+		}
+	} else {
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, socketBufSize); err != nil {
+			log.Printf("⚠️  Failed to set SO_SNDBUF on socket: %v (using kernel default)", err)
+		}
+	}
+
 	// On macOS, try different binding strategies to receive packets
 	if runtime.GOOS == "darwin" {
 		// Try binding to INADDR_ANY first to receive all packets
@@ -138,7 +158,7 @@ func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort 
 		remoteIP:   remoteIP,
 		remotePort: remotePort,
 		isServer:   isServer,
-		pcapPacket: make(chan []byte, 100),
+		pcapPacket: make(chan []byte, 4096),
 	}
 
 	// On macOS, try to use libpcap for receiving packets
@@ -232,7 +252,8 @@ func (rs *RawSocket) pcapReceiver() {
 				case rs.pcapPacket <- packetData:
 					// Successfully queued
 				default:
-					// Channel full, drop packet (shouldn't happen often with buffer size 100)
+					// Channel full, drop packet
+					atomic.AddUint64(&rs.pcapDropCount, 1)
 				}
 			} else {
 				// Debug: log filtered packets during handshake (first few only)
@@ -560,7 +581,7 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 func (rs *RawSocket) SetReadTimeout(sec, usec int64) error {
 	tv := syscall.Timeval{
 		Sec:  sec,
-		Usec: int32(usec),
+		Usec: usec,
 	}
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 }
@@ -569,7 +590,7 @@ func (rs *RawSocket) SetReadTimeout(sec, usec int64) error {
 func (rs *RawSocket) SetWriteTimeout(sec, usec int64) error {
 	tv := syscall.Timeval{
 		Sec:  sec,
-		Usec: int32(usec),
+		Usec: usec,
 	}
 	return syscall.SetsockoptTimeval(rs.fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
 }
@@ -658,3 +679,8 @@ func (rs *RawSocket) SetRemoteAddr(ip net.IP, port uint16) {
 }
 
 var _ = unsafe.Sizeof(0) // For future use
+
+// GetDropStats returns packet drop counters for observability.
+func (rs *RawSocket) GetDropStats() (pcapDrops, recvDrops uint64) {
+	return atomic.LoadUint64(&rs.pcapDropCount), atomic.LoadUint64(&rs.recvDropCount)
+}
