@@ -11,8 +11,6 @@ import (
 const (
 	// ServerRoutePenalty is the quality penalty for routing through server
 	ServerRoutePenalty = 20
-	// RelayHopPenalty is the quality penalty per relay hop
-	RelayHopPenalty = 15
 )
 
 // RouteType represents the type of route
@@ -96,41 +94,6 @@ func (rt *RoutingTable) updateRouteForPeer(peer *p2p.PeerInfo) {
 		Quality:     serverQuality,
 		LastUpdated: time.Now(),
 	}
-}
-
-// findBestRelayRoute finds the best relay route to a peer (must be called with lock held)
-func (rt *RoutingTable) findBestRelayRoute(peer *p2p.PeerInfo) *Route {
-	var bestRoute *Route
-
-	for _, relayIP := range peer.RelayPeers {
-		relayPeer, exists := rt.peers[relayIP.String()]
-		if !exists || !relayPeer.Connected {
-			continue
-		}
-
-		// Calculate relay route quality
-		// Quality is based on relay peer quality minus a hop penalty
-		relayQuality := relayPeer.GetQualityScore() - RelayHopPenalty // Penalty for additional hop
-
-		// Don't exceed max hops
-		hops := 2
-		if hops > rt.maxHops {
-			continue
-		}
-
-		if bestRoute == nil || relayQuality > bestRoute.Quality {
-			bestRoute = &Route{
-				Destination: peer.TunnelIP,
-				Type:        RouteRelay,
-				NextHop:     relayIP,
-				Hops:        hops,
-				Quality:     relayQuality,
-				LastUpdated: time.Now(),
-			}
-		}
-	}
-
-	return bestRoute
 }
 
 // GetRoute gets the best route to a destination
