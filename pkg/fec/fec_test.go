@@ -6,9 +6,7 @@ import (
 )
 
 // TestDecodeWithMissingFirstShard tests FEC decoding when the first shard is missing
-// This simulates the scenario where shards arrive out of order in large UDP packets
 func TestDecodeWithMissingFirstShard(t *testing.T) {
-	// Create FEC with 3 data shards and 2 parity shards
 	dataShards := 3
 	parityShards := 2
 	shardSize := 100
@@ -17,43 +15,35 @@ func TestDecodeWithMissingFirstShard(t *testing.T) {
 		t.Fatalf("Failed to create FEC: %v", err)
 	}
 
-	// Original data
 	originalData := []byte("This is a test message for FEC encoding and decoding with missing first shard")
 
-	// Encode the data
 	shards, err := fec.Encode(originalData)
 	if err != nil {
 		t.Fatalf("Failed to encode: %v", err)
 	}
 
-	// Simulate missing first shard (shards[0])
 	shardPresent := make([]bool, len(shards))
 	for i := range shardPresent {
 		shardPresent[i] = true
 	}
 	shardPresent[0] = false // First shard is missing
-	
-	// Save the first shard for comparison, but set it to nil in the array
+
 	firstShard := shards[0]
 	shards[0] = nil
 
-	// Attempt to decode with missing first shard
 	decoded, err := fec.Decode(shards, shardPresent)
 	if err != nil {
 		t.Fatalf("Failed to decode with missing first shard: %v", err)
 	}
 
-	// Trim decoded data to original size
 	if len(decoded) > len(originalData) {
 		decoded = decoded[:len(originalData)]
 	}
 
-	// Verify the decoded data matches original
 	if !bytes.Equal(decoded, originalData) {
 		t.Errorf("Decoded data doesn't match original.\nExpected: %s\nGot: %s", originalData, decoded)
 	}
 
-	// Also verify that the reconstructed first shard matches the original
 	if !bytes.Equal(shards[0], firstShard) {
 		t.Error("Reconstructed first shard doesn't match original")
 	}
@@ -76,7 +66,6 @@ func TestDecodeWithMissingMiddleShard(t *testing.T) {
 		t.Fatalf("Failed to encode: %v", err)
 	}
 
-	// Simulate missing middle shard (shards[2])
 	shardPresent := make([]bool, len(shards))
 	for i := range shardPresent {
 		shardPresent[i] = true
@@ -121,7 +110,6 @@ func TestDecodeAllShardsPresent(t *testing.T) {
 		t.Fatalf("Failed to encode: %v", err)
 	}
 
-	// All shards present
 	shardPresent := make([]bool, len(shards))
 	for i := range shardPresent {
 		shardPresent[i] = true
@@ -180,7 +168,6 @@ func TestDecodeLargeData(t *testing.T) {
 		t.Fatalf("Failed to create FEC: %v", err)
 	}
 
-	// Create large data (simulating a large UDP packet)
 	originalData := make([]byte, 8192)
 	for i := range originalData {
 		originalData[i] = byte(i % 256)
@@ -191,17 +178,11 @@ func TestDecodeLargeData(t *testing.T) {
 		t.Fatalf("Failed to encode: %v", err)
 	}
 
-	// Simulate missing first shard only
-	// Note: This simple XOR-based FEC implementation has limited recovery capabilities.
-	// It creates parity shards that are XOR of all data shards, allowing recovery of
-	// only one missing data shard at a time (not one per parity shard).
-	// For production use with better recovery, consider proper Reed-Solomon encoding.
 	shardPresent := make([]bool, len(shards))
 	for i := range shardPresent {
 		shardPresent[i] = true
 	}
 	shardPresent[0] = false
-
 	shards[0] = nil
 
 	decoded, err := fec.Decode(shards, shardPresent)
@@ -215,5 +196,190 @@ func TestDecodeLargeData(t *testing.T) {
 
 	if !bytes.Equal(decoded, originalData) {
 		t.Errorf("Decoded large data doesn't match original")
+	}
+}
+
+// TestDecodeMultipleDataShardsMissing tests recovery of multiple missing data shards
+func TestDecodeMultipleDataShardsMissing(t *testing.T) {
+	dataShards := 10
+	parityShards := 3
+	shardSize := 100
+	fec, err := NewFEC(dataShards, parityShards, shardSize)
+	if err != nil {
+		t.Fatalf("Failed to create FEC: %v", err)
+	}
+
+	originalData := make([]byte, 950)
+	for i := range originalData {
+		originalData[i] = byte(i % 256)
+	}
+
+	shards, err := fec.Encode(originalData)
+	if err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	shardPresent := make([]bool, len(shards))
+	for i := range shardPresent {
+		shardPresent[i] = true
+	}
+
+	// Lose shards 0, 3, 7
+	shardPresent[0] = false
+	shardPresent[3] = false
+	shardPresent[7] = false
+
+	shards[0] = nil
+	shards[3] = nil
+	shards[7] = nil
+
+	decoded, err := fec.Decode(shards, shardPresent)
+	if err != nil {
+		t.Fatalf("Failed to decode with multiple missing data shards: %v", err)
+	}
+
+	if len(decoded) > len(originalData) {
+		decoded = decoded[:len(originalData)]
+	}
+
+	if !bytes.Equal(decoded, originalData) {
+		t.Errorf("Decoded data doesn't match original")
+	}
+}
+
+// TestDecodeMultipleMixedMissing tests recovery of mixed missing data and parity shards
+func TestDecodeMultipleMixedMissing(t *testing.T) {
+	dataShards := 10
+	parityShards := 5
+	shardSize := 100
+	fec, err := NewFEC(dataShards, parityShards, shardSize)
+	if err != nil {
+		t.Fatalf("Failed to create FEC: %v", err)
+	}
+
+	originalData := make([]byte, 950)
+	for i := range originalData {
+		originalData[i] = byte((i * 17) % 256)
+	}
+
+	shards, err := fec.Encode(originalData)
+	if err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	shardPresent := make([]bool, len(shards))
+	for i := range shardPresent {
+		shardPresent[i] = true
+	}
+
+	// Lose 2 data shards and 2 parity shards
+	shardPresent[2] = false
+	shardPresent[8] = false
+	shardPresent[11] = false // Parity 1
+	shardPresent[13] = false // Parity 3
+
+	shards[2] = nil
+	shards[8] = nil
+	shards[11] = nil
+	shards[13] = nil
+
+	decoded, err := fec.Decode(shards, shardPresent)
+	if err != nil {
+		t.Fatalf("Failed to decode with mixed missing shards: %v", err)
+	}
+
+	if len(decoded) > len(originalData) {
+		decoded = decoded[:len(originalData)]
+	}
+
+	if !bytes.Equal(decoded, originalData) {
+		t.Errorf("Decoded data doesn't match original")
+	}
+}
+
+// TestDecodeMaxRecovery tests recovery when exactly parityShards number of shards are missing
+func TestDecodeMaxRecovery(t *testing.T) {
+	dataShards := 5
+	parityShards := 3
+	shardSize := 100
+	fec, err := NewFEC(dataShards, parityShards, shardSize)
+	if err != nil {
+		t.Fatalf("Failed to create FEC: %v", err)
+	}
+
+	originalData := make([]byte, 480)
+	for i := range originalData {
+		originalData[i] = byte((i * 31) % 256)
+	}
+
+	shards, err := fec.Encode(originalData)
+	if err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	shardPresent := make([]bool, len(shards))
+	for i := range shardPresent {
+		shardPresent[i] = true
+	}
+
+	// Lose exactly 3 shards
+	shardPresent[1] = false
+	shardPresent[4] = false
+	shardPresent[6] = false // Parity 1
+
+	shards[1] = nil
+	shards[4] = nil
+	shards[6] = nil
+
+	decoded, err := fec.Decode(shards, shardPresent)
+	if err != nil {
+		t.Fatalf("Failed to decode with max missing shards: %v", err)
+	}
+
+	if len(decoded) > len(originalData) {
+		decoded = decoded[:len(originalData)]
+	}
+
+	if !bytes.Equal(decoded, originalData) {
+		t.Errorf("Decoded data doesn't match original")
+	}
+}
+
+// TestDecodeExceedRecovery tests that decoding fails when more than parityShards are missing
+func TestDecodeExceedRecovery(t *testing.T) {
+	dataShards := 5
+	parityShards := 3
+	shardSize := 100
+	fec, err := NewFEC(dataShards, parityShards, shardSize)
+	if err != nil {
+		t.Fatalf("Failed to create FEC: %v", err)
+	}
+
+	originalData := []byte("Test exceed recovery")
+
+	shards, err := fec.Encode(originalData)
+	if err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	shardPresent := make([]bool, len(shards))
+	for i := range shardPresent {
+		shardPresent[i] = true
+	}
+
+	// Lose 4 shards (exceeds parityShards of 3)
+	shardPresent[0] = false
+	shardPresent[2] = false
+	shardPresent[4] = false
+	shardPresent[7] = false // Parity 2
+
+	shards[0] = nil
+	shards[2] = nil
+	shards[4] = nil
+	shards[7] = nil
+
+	_, err = fec.Decode(shards, shardPresent)
+	if err == nil {
+		t.Error("Expected error when missing too many shards, but got nil")
 	}
 }
