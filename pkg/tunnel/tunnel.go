@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -56,18 +57,18 @@ const (
 	P2PMaxBackoffSeconds           = 32 // Maximum backoff delay in seconds
 
 	// Queue management constants
-	QueueSendTimeout = 500 * time.Millisecond // Timeout for queue send operations to handle temporary congestion (increased from 100ms to reduce packet drops)
+	QueueSendTimeout = 10 * time.Millisecond // Timeout for queue send operations; keep short to avoid blocking TUN reads
 
 	// Connection health constants
 	// IdleConnectionTimeout is the maximum time without receiving packets before considering connection dead.
 	// This is critical for detecting "fake death" scenarios where ISPs silently drop packets without
-	// closing the TCP connection. Reduced to 15 seconds for faster detection and recovery.
-	// Set to 3x the keepalive interval to allow for some packet loss and network jitter.
-	IdleConnectionTimeout = 15 * time.Second // 3x default keepalive (5s)
+	// closing the TCP connection. Set to 6x the keepalive interval to tolerate transient packet loss
+	// on lossy networks without triggering unnecessary reconnections (which themselves cause data loss).
+	IdleConnectionTimeout = 30 * time.Second // 6x default keepalive (5s)
 
 	// Authentication constants
-	AuthenticationTimeout     = 10 * time.Second  // Timeout for authentication handshake (increased from 5s to handle high-latency networks)
-	AuthenticationTimeWindow  = 300               // Authentication timestamp validity window in seconds (5 minutes)
+	AuthenticationTimeout    = 10 * time.Second // Timeout for authentication handshake (increased from 5s to handle high-latency networks)
+	AuthenticationTimeWindow = 300              // Authentication timestamp validity window in seconds (5 minutes)
 
 	// Rotation and advertisement timing
 	KeyRotationGracePeriod     = 15 * time.Second
@@ -100,31 +101,31 @@ func enqueueWithTimeout(queue chan []byte, packet []byte, stopCh <-chan struct{}
 
 // ClientConnection represents a single client connection
 type ClientConnection struct {
-	conn         faketcp.ConnAdapter // Changed to interface for both UDP and Raw socket modes
-	sendQueue    chan []byte
-	recvQueue    chan []byte
-	clientIP     net.IP
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
-	lastPeerInfo string // Last peer info string sent by this client
-	cipher       *crypto.Cipher
-	cipherGen    uint64
-	lastRecvTime time.Time // Last time we received a packet from this client
-	authenticated bool     // Whether this client has been authenticated (for encrypt_after_auth mode)
-	mu           sync.RWMutex
+	conn          faketcp.ConnAdapter // Changed to interface for both UDP and Raw socket modes
+	sendQueue     chan []byte
+	recvQueue     chan []byte
+	clientIP      net.IP
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
+	lastPeerInfo  string // Last peer info string sent by this client
+	cipher        *crypto.Cipher
+	cipherGen     uint64
+	lastRecvTime  time.Time // Last time we received a packet from this client
+	authenticated bool      // Whether this client has been authenticated (for encrypt_after_auth mode)
+	mu            sync.RWMutex
 }
 
 // fecRecvSession tracks state for receiving FEC encoded packets
 type fecRecvSession struct {
-	shards        [][]byte // Received shards
-	shardPresent  []bool   // Track which shards have been received
-	dataShards    int      // Expected number of data shards
-	parityShards  int      // Expected number of parity shards
-	totalShards   int      // Total shards expected
-	receivedCount int      // Number of shards received so far
+	shards        [][]byte  // Received shards
+	shardPresent  []bool    // Track which shards have been received
+	dataShards    int       // Expected number of data shards
+	parityShards  int       // Expected number of parity shards
+	totalShards   int       // Total shards expected
+	receivedCount int       // Number of shards received so far
 	lastUpdate    time.Time // Last time a shard was received
-	originalSize  int      // Original packet size before FEC encoding
+	originalSize  int       // Original packet size before FEC encoding
 }
 
 // ConfigUpdateMessage carries server-pushed configuration updates.
@@ -216,15 +217,23 @@ type Tunnel struct {
 
 	// FEC state tracking
 	fecEnabled       bool
-	fecSessionID     uint32                      // Current FEC session ID for sending
-	fecRecvSessions  map[string]*fecRecvSession  // FEC receive sessions (key: "peerAddr:sessionID" -> session)
-	fecRecvMux       sync.Mutex                  // Protects fecRecvSessions
-	fecCleanupTicker *time.Ticker                // Ticker for cleaning up stale FEC sessions
+	fecSessionID     uint32                     // Current FEC session ID for sending
+	fecRecvSessions  map[string]*fecRecvSession // FEC receive sessions (key: "peerAddr:sessionID" -> session)
+	fecRecvMux       sync.Mutex                 // Protects fecRecvSessions
+	fecCleanupTicker *time.Ticker               // Ticker for cleaning up stale FEC sessions
 
 	// Authentication state (for encrypt_after_auth mode)
-	authenticated    bool              // Whether client is authenticated (client mode)
-	authMux          sync.Mutex        // Protects authenticated flag
-	authResponseChan chan error        // Channel for receiving auth response (client mode)
+	authenticated    bool       // Whether client is authenticated (client mode)
+	authMux          sync.Mutex // Protects authenticated flag
+	authResponseChan chan error // Channel for receiving auth response (client mode)
+
+	// Reconnection state: tunReader checks this to drop packets early during reconnect
+	reconnecting int32 // atomic; 1 = reconnecting, 0 = connected
+
+	// Drop counters for observability
+	tunReaderDrops uint64 // atomic; packets dropped in tunReader due to full sendQueue
+	recvQueueDrops uint64 // atomic; packets dropped when recvQueue is full
+	p2pRecvDrops   uint64 // atomic; packets dropped in P2P receive path
 }
 
 // prependPacketType adds a leading packet type byte to the payload.
@@ -244,6 +253,36 @@ func prependPacketType(packet []byte, packetType byte) ([]byte, bool) {
 	newPacket[0] = packetType
 	copy(newPacket[1:], packet)
 	return newPacket, false
+}
+
+// dropStatsLogger periodically logs drop statistics for observability.
+// It runs every 30 seconds and only logs when drops have occurred.
+func (t *Tunnel) dropStatsLogger() {
+	defer t.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	var prevTunReaderDrops, prevRecvQueueDrops, prevP2PRecvDrops uint64
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case <-ticker.C:
+			tunDrops := atomic.LoadUint64(&t.tunReaderDrops)
+			recvDrops := atomic.LoadUint64(&t.recvQueueDrops)
+			p2pDrops := atomic.LoadUint64(&t.p2pRecvDrops)
+
+			if tunDrops != prevTunReaderDrops || recvDrops != prevRecvQueueDrops || p2pDrops != prevP2PRecvDrops {
+				log.Printf("📊 Drop stats: tunReader=%d (+%d), recvQueue=%d (+%d), p2pRecv=%d (+%d)",
+					tunDrops, tunDrops-prevTunReaderDrops,
+					recvDrops, recvDrops-prevRecvQueueDrops,
+					p2pDrops, p2pDrops-prevP2PRecvDrops)
+				prevTunReaderDrops = tunDrops
+				prevRecvQueueDrops = recvDrops
+				prevP2PRecvDrops = p2pDrops
+			}
+		}
+	}
 }
 
 // getPacketBuffer pulls a reusable packet buffer sized for tunnel traffic.
@@ -334,7 +373,7 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create encryption cipher: %v", err)
 		}
-		
+
 		if cfg.EncryptAfterAuth {
 			log.Printf("✅ Authentication-only mode enabled (encrypt_after_auth=true)\n" +
 				"   - Data packets will NOT be encrypted after authentication\n" +
@@ -405,7 +444,7 @@ func NewTunnel(cfg *config.Config, configFilePath string) (*Tunnel, error) {
 			return make([]byte, packetBufSize)
 		},
 	}
-	
+
 	// Log FEC status
 	if t.fecEnabled {
 		log.Printf("✅ FEC纠错已启用: %d数据分片 + %d校验分片 (可容忍%d个分片丢失)",
@@ -578,6 +617,10 @@ func (t *Tunnel) Start() error {
 		}
 	}
 
+	// Start periodic drop stats logger for observability
+	t.wg.Add(1)
+	go t.dropStatsLogger()
+
 	log.Printf("Tunnel started in %s mode", t.config.Mode)
 	return nil
 }
@@ -640,6 +683,11 @@ func (t *Tunnel) Stop() {
 		// Stop P2P manager
 		if t.p2pManager != nil {
 			t.p2pManager.Stop()
+		}
+
+		// Stop XDP accelerator flush goroutine
+		if t.xdpAccel != nil {
+			t.xdpAccel.Stop()
 		}
 
 		// Stop SOCKS5 proxy server
@@ -1011,7 +1059,7 @@ type AuthenticationRequest struct {
 func (t *Tunnel) performClientAuthentication() error {
 	const maxRetries = 3
 	var lastErr error
-	
+
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			log.Printf("Authentication attempt %d/%d...", attempt+1, maxRetries)
@@ -1020,50 +1068,50 @@ func (t *Tunnel) performClientAuthentication() error {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			time.Sleep(backoff)
 		}
-		
+
 		// Create authentication request
 		authReq := AuthenticationRequest{
 			Timestamp: time.Now().Unix(),
 			TunnelIP:  t.myTunnelIP.String(),
 		}
-		
+
 		// Marshal to JSON
 		authData, err := json.Marshal(authReq)
 		if err != nil {
 			return fmt.Errorf("failed to marshal auth request: %v", err)
 		}
-		
+
 		authPacket := make([]byte, len(authData)+1)
 		authPacket[0] = PacketTypeAuth
 		copy(authPacket[1:], authData)
-		
+
 		// Encrypt the authentication packet (always encrypted for security)
 		t.cipherMux.RLock()
 		cipher := t.cipher
 		t.cipherMux.RUnlock()
-		
+
 		if cipher == nil {
 			return fmt.Errorf("cipher not available for authentication")
 		}
-		
+
 		encryptedAuth, err := cipher.Encrypt(authPacket)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt auth packet: %v", err)
 		}
-		
+
 		// Send authentication packet
 		if err := t.conn.WritePacket(encryptedAuth); err != nil {
 			lastErr = fmt.Errorf("failed to send auth packet: %v", err)
 			log.Printf("⚠️  Authentication send failed: %v", lastErr)
 			continue
 		}
-		
+
 		// Wait for authentication response (with timeout)
 		// The response will be handled by netReader and sent to authResponseChan
 		if t.authResponseChan == nil {
 			return fmt.Errorf("auth response channel not initialized")
 		}
-		
+
 		select {
 		case err := <-t.authResponseChan:
 			if err != nil {
@@ -1073,10 +1121,10 @@ func (t *Tunnel) performClientAuthentication() error {
 				// Check if it's a permanent error (key mismatch) vs transient error
 				// Permanent errors: INVALID response, decryption errors, wrong key
 				// These indicate a configuration problem that won't be fixed by retrying
-				if strings.Contains(errMsg, "INVALID") || 
-				   strings.Contains(errMsg, "wrong key") ||
-				   strings.Contains(errMsg, "decryption") ||
-				   strings.Contains(errMsg, "cipher") {
+				if strings.Contains(errMsg, "INVALID") ||
+					strings.Contains(errMsg, "wrong key") ||
+					strings.Contains(errMsg, "decryption") ||
+					strings.Contains(errMsg, "cipher") {
 					return fmt.Errorf("authentication failed: incorrect encryption key - please verify both client and server use the same key")
 				}
 				// For other errors (like EXPIRED timestamp), retry may help
@@ -1093,7 +1141,7 @@ func (t *Tunnel) performClientAuthentication() error {
 			continue
 		}
 	}
-	
+
 	// All retries failed
 	if lastErr != nil {
 		return fmt.Errorf("authentication failed after %d attempts: %v", maxRetries, lastErr)
@@ -1118,6 +1166,9 @@ func (t *Tunnel) reconnectToServer() error {
 		return nil
 	}
 
+	// Signal tunReader to drop packets immediately instead of waiting on full queue
+	atomic.StoreInt32(&t.reconnecting, 1)
+	defer atomic.StoreInt32(&t.reconnecting, 0)
 	defer t.connMux.Unlock()
 
 	backoff := 1
@@ -1140,11 +1191,11 @@ func (t *Tunnel) reconnectToServer() error {
 
 		log.Printf("Reconnect attempt failed: %v", err)
 
-		// Sleep with exponential backoff capped
+		// Sleep with exponential backoff capped at 16s (was 32s)
 		time.Sleep(time.Duration(backoff) * time.Second)
 		backoff *= 2
-		if backoff > 32 {
-			backoff = 32
+		if backoff > 16 {
+			backoff = 16
 		}
 	}
 }
@@ -1373,6 +1424,14 @@ func (t *Tunnel) tunReader() {
 			// Default: queue for server
 			// Use immediate drop if queue is full to prevent blocking TUN read
 			// This is critical on macOS to prevent TUN buffer overflow
+
+			// During reconnection, drop immediately — no point queuing for a dead conn
+			if atomic.LoadInt32(&t.reconnecting) == 1 {
+				atomic.AddUint64(&t.tunReaderDrops, 1)
+				t.releasePacketBuffer(packetBuf)
+				continue
+			}
+
 			select {
 			case t.sendQueue <- packet:
 				// Successfully queued - packet will be sent by netWriter
@@ -1391,6 +1450,7 @@ func (t *Tunnel) tunReader() {
 					return
 				default:
 					// Queue is still full after timeout, drop to prevent TUN buffer overflow
+					atomic.AddUint64(&t.tunReaderDrops, 1)
 					t.releasePacketBuffer(packetBuf)
 					// Only log occasionally to avoid log spam
 					if queueSize > 0 && queueSize%500 == 0 {
@@ -1592,8 +1652,9 @@ func (t *Tunnel) tunWriter() {
 					break
 				}
 
-				if err == syscall.ENOBUFS {
-					// TUN buffer is full, wait a bit and retry
+				// Recoverable errors: ENOBUFS (buffer full), EAGAIN (resource temporarily unavailable), EIO (device hiccup)
+				if err == syscall.ENOBUFS || err == syscall.EAGAIN || err == syscall.EIO {
+					// TUN buffer is full or device busy, wait a bit and retry
 					if retry < maxRetries-1 {
 						time.Sleep(retryDelay)
 						retryDelay *= 2 // Exponential backoff
@@ -1602,15 +1663,16 @@ func (t *Tunnel) tunWriter() {
 					// Last retry failed, log and drop
 					recvQueueSize := len(t.recvQueue)
 					if protocol == 1 {
-						log.Printf("❌ TUN write buffer full (ENOBUFS) after %d retries, dropping ICMP packet (recv queue: %d)", maxRetries, recvQueueSize)
+						log.Printf("❌ TUN write error (%v) after %d retries, dropping ICMP packet (recv queue: %d)", err, maxRetries, recvQueueSize)
 					} else if recvQueueSize%100 == 0 {
-						log.Printf("⚠️  TUN write buffer full (ENOBUFS) after %d retries, dropping packet (recv queue: %d)", maxRetries, recvQueueSize)
+						log.Printf("⚠️  TUN write error (%v) after %d retries, dropping packet (recv queue: %d)", err, maxRetries, recvQueueSize)
 					}
 					// Don't return - continue processing other packets
 					break
 				}
 
-				// Other errors are more serious
+				// Non-recoverable errors — log but DON'T exit the goroutine.
+				// Exiting tunWriter kills all TUN writes permanently, which is worse than a transient error.
 				select {
 				case <-t.stopCh:
 					return
@@ -1620,8 +1682,10 @@ func (t *Tunnel) tunWriter() {
 					} else {
 						log.Printf("TUN write error: %v", err)
 					}
-					return
+					// Break out of retry loop, continue reading from recvQueue
+					break
 				}
+				break
 			}
 		}
 	}
@@ -1744,13 +1808,13 @@ func (t *Tunnel) netReader() {
 				// Only returns error when stopCh is closed
 				return
 			}
-			
+
 			// Re-authenticate if in encrypt_after_auth mode
 			if t.config.EncryptAfterAuth && t.cipher != nil {
 				t.authMux.Lock()
 				t.authenticated = false
 				t.authMux.Unlock()
-				
+
 				if err := t.performClientAuthentication(); err != nil {
 					log.Printf("❌ Re-authentication failed after reconnect: %v", err)
 					log.Printf("Connection will close, please check your encryption key")
@@ -1797,7 +1861,7 @@ func (t *Tunnel) netReader() {
 					log.Printf("FEC shard processing error: %v", err)
 					continue
 				}
-				
+
 				if reconstructedPacket != nil {
 					// Successfully reconstructed encrypted packet
 					// Now decrypt it
@@ -1806,15 +1870,15 @@ func (t *Tunnel) netReader() {
 						log.Printf("FEC reconstructed packet decryption error: %v", err)
 						continue
 					}
-					
+
 					if len(decryptedPacket) < 1 {
 						continue
 					}
-					
+
 					// Process the decrypted packet
 					packetType := decryptedPacket[0]
 					payload := decryptedPacket[1:]
-					
+
 					if packetType == PacketTypeData {
 						// Queue for TUN device
 						if !enqueueWithTimeout(t.recvQueue, payload, t.stopCh) {
@@ -1822,6 +1886,7 @@ func (t *Tunnel) netReader() {
 							case <-t.stopCh:
 								return
 							default:
+								atomic.AddUint64(&t.recvQueueDrops, 1)
 								log.Printf("Receive queue full after timeout, dropping FEC reconstructed packet")
 							}
 						}
@@ -1883,6 +1948,7 @@ func (t *Tunnel) netReader() {
 				case <-t.stopCh:
 					return
 				default:
+					atomic.AddUint64(&t.recvQueueDrops, 1)
 					if protocol == 1 {
 						log.Printf("❌ Receive queue full after timeout, dropping ICMP packet (queue size: %d)", len(t.recvQueue))
 					} else {
@@ -1900,12 +1966,12 @@ func (t *Tunnel) netReader() {
 				log.Printf("⚠️  Received unexpected auth response (encrypt_after_auth is disabled)")
 				break
 			}
-			
+
 			if t.authResponseChan == nil {
 				log.Printf("⚠️  Received auth response but channel is nil - this shouldn't happen")
 				break
 			}
-			
+
 			responseData := string(payload)
 			if responseData != "OK" {
 				select {
@@ -2205,7 +2271,7 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 					log.Printf("FEC shard processing error from client %s: %v", client.conn.RemoteAddr(), err)
 					continue
 				}
-				
+
 				if reconstructedPacket != nil {
 					// Successfully reconstructed encrypted packet
 					// Now decrypt it
@@ -2214,15 +2280,15 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 						log.Printf("FEC reconstructed packet decryption error from %s: %v", client.conn.RemoteAddr(), err)
 						continue
 					}
-					
+
 					if usedCipher != nil {
 						client.setCipherWithGen(usedCipher, gen)
 					}
-					
+
 					if len(decryptedPacket) < 1 {
 						continue
 					}
-					
+
 					// Process the decrypted packet - use the packet variable for the rest of the code
 					packet = decryptedPacket
 				} else {
@@ -2613,6 +2679,7 @@ func (t *Tunnel) handleP2PPacket(peerIP net.IP, data []byte) {
 		case <-t.stopCh:
 			return
 		default:
+			atomic.AddUint64(&t.p2pRecvDrops, 1)
 			log.Printf("Receive queue full, dropping P2P packet from %s", peerIP)
 		}
 	case PacketTypePeerInfo:
@@ -3297,7 +3364,7 @@ func (t *Tunnel) sendPacketWithRouting(packet []byte) (bool, error) {
 	}
 
 	dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
-	
+
 	// Validate IP address - ensure it's a valid unicast address
 	// Filter out obviously invalid IPs (network addresses, etc.)
 	if dstIP == nil || dstIP.IsUnspecified() || dstIP.IsMulticast() || dstIP.IsLoopback() {
@@ -3581,7 +3648,7 @@ func (t *Tunnel) encryptPacket(data []byte) ([]byte, error) {
 	if c == nil {
 		return data, nil
 	}
-	
+
 	// Check if we should skip encryption for authenticated data packets
 	if t.config.EncryptAfterAuth && len(data) > 0 {
 		packetType := data[0]
@@ -3590,7 +3657,7 @@ func (t *Tunnel) encryptPacket(data []byte) ([]byte, error) {
 			t.authMux.Lock()
 			isAuthenticated := t.authenticated
 			t.authMux.Unlock()
-			
+
 			if isAuthenticated {
 				// Skip encryption for data packets in authenticated session
 				return data, nil
@@ -3598,7 +3665,7 @@ func (t *Tunnel) encryptPacket(data []byte) ([]byte, error) {
 		}
 		// Control packets (keepalive, peer info, etc.) are always encrypted
 	}
-	
+
 	if t.shouldSkipOuterEncryption(data) {
 		return data, nil
 	}
@@ -3621,7 +3688,7 @@ func (t *Tunnel) decryptWithFallback(data []byte) ([]byte, *crypto.Cipher, uint6
 			t.authMux.Lock()
 			isAuthenticated := t.authenticated
 			t.authMux.Unlock()
-			
+
 			if isAuthenticated {
 				// Data packets in authenticated sessions are not encrypted
 				return data, nil, 0, nil
@@ -3679,7 +3746,7 @@ func (t *Tunnel) decryptPacketFromClient(client *ClientConnection, data []byte) 
 			client.mu.RLock()
 			isAuthenticated := client.authenticated
 			client.mu.RUnlock()
-			
+
 			if isAuthenticated {
 				// Data packets from authenticated clients are not encrypted
 				return data, nil, 0, nil
@@ -3687,7 +3754,7 @@ func (t *Tunnel) decryptPacketFromClient(client *ClientConnection, data []byte) 
 		}
 		// Control packets are always encrypted, so proceed with decryption
 	}
-	
+
 	return t.decryptWithFallback(data)
 }
 
@@ -3695,7 +3762,7 @@ func (t *Tunnel) encryptForClient(client *ClientConnection, data []byte) ([]byte
 	if t.shouldSkipOuterEncryption(data) {
 		return data, nil
 	}
-	
+
 	// Check if we should skip encryption for authenticated data packets
 	if t.config.EncryptAfterAuth && client != nil && len(data) > 0 {
 		packetType := data[0]
@@ -3704,7 +3771,7 @@ func (t *Tunnel) encryptForClient(client *ClientConnection, data []byte) ([]byte
 			client.mu.RLock()
 			isAuthenticated := client.authenticated
 			client.mu.RUnlock()
-			
+
 			if isAuthenticated {
 				// Skip encryption for data packets from authenticated client
 				return data, nil
@@ -3712,7 +3779,7 @@ func (t *Tunnel) encryptForClient(client *ClientConnection, data []byte) ([]byte
 		}
 		// Control packets are always encrypted
 	}
-	
+
 	if client != nil {
 		if c, _ := client.getCipher(); c != nil {
 			return c.Encrypt(data)
@@ -3843,7 +3910,7 @@ func (t *Tunnel) handleClientAuthentication(client *ClientConnection, payload []
 		t.sendAuthResponse(client, "INVALID")
 		return
 	}
-	
+
 	// Validate timestamp (prevent replay attacks)
 	now := time.Now().Unix()
 	if now-authReq.Timestamp > AuthenticationTimeWindow || authReq.Timestamp-now > AuthenticationTimeWindow {
@@ -3851,7 +3918,7 @@ func (t *Tunnel) handleClientAuthentication(client *ClientConnection, payload []
 		t.sendAuthResponse(client, "EXPIRED")
 		return
 	}
-	
+
 	// Validate tunnel IP
 	tunnelIP := net.ParseIP(authReq.TunnelIP)
 	if tunnelIP == nil {
@@ -3859,15 +3926,15 @@ func (t *Tunnel) handleClientAuthentication(client *ClientConnection, payload []
 		t.sendAuthResponse(client, "INVALID")
 		return
 	}
-	
+
 	// Mark client as authenticated
 	client.mu.Lock()
 	client.authenticated = true
 	client.mu.Unlock()
-	
-	log.Printf("✅ Client %s authenticated successfully (IP: %s) - data packets will not be encrypted", 
+
+	log.Printf("✅ Client %s authenticated successfully (IP: %s) - data packets will not be encrypted",
 		client.conn.RemoteAddr(), tunnelIP)
-	
+
 	// Send success response
 	t.sendAuthResponse(client, "OK")
 }
@@ -3877,23 +3944,23 @@ func (t *Tunnel) sendAuthResponse(client *ClientConnection, status string) {
 	responsePacket := make([]byte, len(status)+1)
 	responsePacket[0] = PacketTypeAuthResponse
 	copy(responsePacket[1:], []byte(status))
-	
+
 	// Always encrypt auth response for security
 	t.cipherMux.RLock()
 	cipher := t.cipher
 	t.cipherMux.RUnlock()
-	
+
 	if cipher == nil {
 		log.Printf("Cannot send auth response: no cipher available")
 		return
 	}
-	
+
 	encryptedResponse, err := cipher.Encrypt(responsePacket)
 	if err != nil {
 		log.Printf("Failed to encrypt auth response: %v", err)
 		return
 	}
-	
+
 	if err := client.conn.WritePacket(encryptedResponse); err != nil {
 		log.Printf("Failed to send auth response to %s: %v", client.conn.RemoteAddr(), err)
 	}
@@ -4413,50 +4480,50 @@ func (t *Tunnel) sendPacketWithFEC(conn faketcp.ConnAdapter, packet []byte) erro
 		// FEC not enabled, send packet directly
 		return conn.WritePacket(packet)
 	}
-	
+
 	// Get next session ID
 	sessionID := t.fecSessionID
 	t.fecSessionID++
-	
+
 	// FEC encode the packet
 	shards, err := t.fec.Encode(packet)
 	if err != nil {
 		return fmt.Errorf("FEC encoding failed: %v", err)
 	}
-	
+
 	// Send each shard with FEC header
 	// FEC header format: [PacketTypeFECShard][sessionID:4][shardIndex:2][totalShards:2][originalSize:4][shard_data]
 	totalShards := len(shards)
 	originalSize := len(packet)
-	
+
 	for i, shard := range shards {
 		// Build FEC packet
 		fecPacket := make([]byte, 1+4+2+2+4+len(shard))
 		fecPacket[0] = PacketTypeFECShard
-		
+
 		// Session ID (4 bytes)
 		fecPacket[1] = byte(sessionID >> 24)
 		fecPacket[2] = byte(sessionID >> 16)
 		fecPacket[3] = byte(sessionID >> 8)
 		fecPacket[4] = byte(sessionID)
-		
+
 		// Shard index (2 bytes)
 		fecPacket[5] = byte(i >> 8)
 		fecPacket[6] = byte(i)
-		
+
 		// Total shards (2 bytes)
 		fecPacket[7] = byte(totalShards >> 8)
 		fecPacket[8] = byte(totalShards)
-		
+
 		// Original size (4 bytes)
 		fecPacket[9] = byte(originalSize >> 24)
 		fecPacket[10] = byte(originalSize >> 16)
 		fecPacket[11] = byte(originalSize >> 8)
 		fecPacket[12] = byte(originalSize)
-		
+
 		// Shard data
 		copy(fecPacket[13:], shard)
-		
+
 		// Send the FEC packet
 		if err := conn.WritePacket(fecPacket); err != nil {
 			// Even if one shard fails, continue sending others
@@ -4464,7 +4531,7 @@ func (t *Tunnel) sendPacketWithFEC(conn faketcp.ConnAdapter, packet []byte) erro
 			log.Printf("Failed to send FEC shard %d/%d: %v", i+1, totalShards, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -4475,38 +4542,38 @@ func (t *Tunnel) processFECShard(peerAddr string, fecPacket []byte) ([]byte, err
 	if len(fecPacket) < 12 {
 		return nil, errors.New("FEC packet too short")
 	}
-	
+
 	// Parse FEC header (PacketTypeFECShard already stripped by caller)
 	sessionID := uint32(fecPacket[0])<<24 | uint32(fecPacket[1])<<16 | uint32(fecPacket[2])<<8 | uint32(fecPacket[3])
 	shardIndex := int(fecPacket[4])<<8 | int(fecPacket[5])
 	totalShards := int(fecPacket[6])<<8 | int(fecPacket[7])
 	originalSize := int(fecPacket[8])<<24 | int(fecPacket[9])<<16 | int(fecPacket[10])<<8 | int(fecPacket[11])
 	shardData := fecPacket[12:]
-	
+
 	// Create unique session key using peer address and session ID
 	sessionKey := fmt.Sprintf("%s:%d", peerAddr, sessionID)
-	
+
 	// Validate
 	if totalShards != t.fec.TotalShards() {
 		return nil, fmt.Errorf("FEC total shards mismatch: expected %d, got %d", t.fec.TotalShards(), totalShards)
 	}
-	
+
 	if shardIndex >= totalShards {
 		return nil, fmt.Errorf("FEC shard index out of range: %d >= %d", shardIndex, totalShards)
 	}
-	
+
 	// Validate original size is reasonable (prevent memory exhaustion attacks)
 	// Maximum reasonable packet size is MTU + encryption overhead + some margin
 	const maxReasonablePacketSize = 65536 // 64KB should be more than enough
 	if originalSize <= 0 || originalSize > maxReasonablePacketSize {
 		return nil, fmt.Errorf("FEC original size invalid: %d (must be 1-%d)", originalSize, maxReasonablePacketSize)
 	}
-	
+
 	// Validate shard data is not empty
 	if len(shardData) == 0 {
 		return nil, fmt.Errorf("FEC shard data is empty")
 	}
-	
+
 	// Get or create FEC session
 	t.fecRecvMux.Lock()
 	session, exists := t.fecRecvSessions[sessionKey]
@@ -4524,15 +4591,15 @@ func (t *Tunnel) processFECShard(peerAddr string, fecPacket []byte) ([]byte, err
 		}
 		t.fecRecvSessions[sessionKey] = session
 	}
-	
+
 	// Validate shard consistency
 	if session.originalSize != originalSize {
 		t.fecRecvMux.Unlock()
 		return nil, fmt.Errorf("FEC session %s: original size mismatch (%d vs %d)", sessionKey, session.originalSize, originalSize)
 	}
-	
+
 	t.fecRecvMux.Unlock()
-	
+
 	// Add shard to session
 	if !session.shardPresent[shardIndex] {
 		session.shards[shardIndex] = make([]byte, len(shardData))
@@ -4541,7 +4608,7 @@ func (t *Tunnel) processFECShard(peerAddr string, fecPacket []byte) ([]byte, err
 		session.receivedCount++
 		session.lastUpdate = time.Now()
 	}
-	
+
 	// Check if we can reconstruct
 	if session.receivedCount >= session.dataShards {
 		// Attempt to decode
@@ -4549,20 +4616,20 @@ func (t *Tunnel) processFECShard(peerAddr string, fecPacket []byte) ([]byte, err
 		if err != nil {
 			return nil, fmt.Errorf("FEC decoding failed: %v", err)
 		}
-		
+
 		// Trim to original size
 		if len(decodedData) > originalSize {
 			decodedData = decodedData[:originalSize]
 		}
-		
+
 		// Clean up session
 		t.fecRecvMux.Lock()
 		delete(t.fecRecvSessions, sessionKey)
 		t.fecRecvMux.Unlock()
-		
+
 		return decodedData, nil
 	}
-	
+
 	// Need more shards
 	return nil, nil
 }
@@ -4570,10 +4637,10 @@ func (t *Tunnel) processFECShard(peerAddr string, fecPacket []byte) ([]byte, err
 // cleanupStaleFECSessions removes old FEC sessions that haven't been updated
 func (t *Tunnel) cleanupStaleFECSessions() {
 	const sessionTimeout = 5 * time.Second
-	
+
 	t.fecRecvMux.Lock()
 	defer t.fecRecvMux.Unlock()
-	
+
 	now := time.Now()
 	for sessionKey, session := range t.fecRecvSessions {
 		if now.Sub(session.lastUpdate) > sessionTimeout {
@@ -4587,14 +4654,14 @@ func (t *Tunnel) startFECCleanup() {
 	if !t.fecEnabled {
 		return
 	}
-	
+
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()
-		
+
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-t.stopCh:
