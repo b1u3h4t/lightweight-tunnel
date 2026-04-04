@@ -10,22 +10,24 @@ import (
 
 // PeerInfo contains information about a peer
 type PeerInfo struct {
-	TunnelIP     net.IP    // Tunnel IP address (e.g., 10.0.0.2)
-	PublicAddr   string    // Public address for P2P (IP:Port)
-	LocalAddr    string    // Local address behind NAT
-	NATType      nat.NATType // NAT type of this peer
-	LastSeen     time.Time // Last time we received data from this peer
-	Latency      time.Duration // Measured latency to this peer
-	PacketLoss   float64   // Packet loss rate (0.0 - 1.0)
-	Connected    bool      // Whether P2P connection is established
-	ThroughServer bool     // Whether currently routing through server
-	IsLocalConnection bool // Whether connection is via local network (not NAT)
-	RelayPeers   []net.IP  // List of peers that can relay to this peer
-	// Quality monitoring fields
-	packetsSent     uint64 // Total packets sent
-	packetsReceived uint64 // Total packets received (for loss calculation)
+	TunnelIP          net.IP        // Tunnel IP address (e.g., 10.0.0.2)
+	PublicAddr        string        // Public address for P2P (IP:Port)
+	LocalAddr         string        // Local address behind NAT
+	NATType           nat.NATType   // NAT type of this peer
+	LastSeen          time.Time     // Last time we received data from this peer
+	Latency           time.Duration // Measured latency to this peer
+	PacketLoss        float64       // Packet loss rate (0.0 - 1.0)
+	Connected         bool          // Whether P2P connection is established
+	ThroughServer     bool          // Whether currently routing through server
+	IsLocalConnection bool          // Whether connection is via local network (not NAT)
+	RelayPeers        []net.IP      // List of peers that can relay to this peer
+	// Quality monitoring fields — sequence-number based loss tracking
+	sendSeq          uint64    // Monotonic sequence number for sent packets
+	recvCount        uint64    // Number of packets received in this measurement window
+	recvMaxSeq       uint64    // Highest sequence number observed from remote peer
+	recvMinSeq       uint64    // Lowest sequence number observed in this window (0 = unset)
 	lastQualityCheck time.Time // Last time quality was checked
-	mu           sync.RWMutex
+	mu               sync.RWMutex
 }
 
 // NewPeerInfo creates a new peer information structure
@@ -53,57 +55,81 @@ func (p *PeerInfo) UpdatePacketLoss(loss float64) {
 	p.PacketLoss = loss
 }
 
-// RecordPacketSent increments the sent packet counter
-func (p *PeerInfo) RecordPacketSent() {
+// RecordPacketSent increments the send sequence counter and returns the
+// sequence number that should be embedded in the packet header.
+func (p *PeerInfo) RecordPacketSent() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.packetsSent++
+	p.sendSeq++
+	return p.sendSeq
 }
 
-// RecordPacketReceived increments the received packet counter
+// RecordPacketReceived records an incoming packet with the given remote
+// sequence number. If seq is 0 (legacy peer without sequence numbers),
+// we fall back to simple counting.
 func (p *PeerInfo) RecordPacketReceived() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.packetsReceived++
+	p.recvCount++
 	p.LastSeen = time.Now()
 }
 
-// CalculatePacketLoss calculates packet loss based on sent/received counters
-// This is a simplified approach - in reality would need sequence numbers
-// Note: This assumes bidirectional traffic equality, which may not hold in practice.
-// For more accurate results, a protocol with sequence numbers and acknowledgments would be needed.
+// RecordPacketReceivedWithSeq records an incoming packet with a known
+// remote sequence number for accurate loss calculation.
+func (p *PeerInfo) RecordPacketReceivedWithSeq(seq uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.recvCount++
+	if seq > p.recvMaxSeq {
+		p.recvMaxSeq = seq
+	}
+	if p.recvMinSeq == 0 || seq < p.recvMinSeq {
+		p.recvMinSeq = seq
+	}
+	p.LastSeen = time.Now()
+}
+
+// CalculatePacketLoss calculates packet loss based on sequence number gaps.
+// If sequence numbers are available (recvMaxSeq > 0), loss is calculated as:
+//
+//	expectedCount = recvMaxSeq - recvMinSeq + 1
+//	loss = 1 - (recvCount / expectedCount)
+//
+// This measures true unidirectional receive loss regardless of traffic asymmetry.
+// If no sequence numbers are available, returns the last known loss value.
 func (p *PeerInfo) CalculatePacketLoss() float64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
-	if p.packetsSent == 0 {
-		return 0.0
+
+	if p.recvMaxSeq > 0 && p.recvMinSeq > 0 && p.recvMaxSeq >= p.recvMinSeq {
+		// Sequence-number based: count how many packets in the range we actually got
+		expectedCount := p.recvMaxSeq - p.recvMinSeq + 1
+		if expectedCount == 0 {
+			return 0.0
+		}
+		actual := p.recvCount
+		if actual > expectedCount {
+			actual = expectedCount // cap at 100% (duplicates don't mean negative loss)
+		}
+		loss := 1.0 - float64(actual)/float64(expectedCount)
+		if loss < 0 {
+			loss = 0
+		}
+		p.PacketLoss = loss
+		return loss
 	}
-	
-	// Expected to receive roughly same amount as sent (bidirectional)
-	// This is simplified - real implementation would use acknowledgments
-	expectedReceived := p.packetsSent
-	actualReceived := p.packetsReceived
-	
-	if actualReceived >= expectedReceived {
-		return 0.0 // No loss
-	}
-	
-	loss := float64(expectedReceived-actualReceived) / float64(expectedReceived)
-	if loss > 1.0 {
-		loss = 1.0
-	}
-	
-	p.PacketLoss = loss
-	return loss
+
+	// No sequence data available — cannot calculate meaningful loss
+	return p.PacketLoss
 }
 
 // ResetPacketCounters resets packet statistics (called periodically)
 func (p *PeerInfo) ResetPacketCounters() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.packetsSent = 0
-	p.packetsReceived = 0
+	p.recvCount = 0
+	p.recvMaxSeq = 0
+	p.recvMinSeq = 0
 	p.lastQualityCheck = time.Now()
 }
 
@@ -145,21 +171,6 @@ func (p *PeerInfo) SetThroughServer(through bool) {
 	p.ThroughServer = through
 }
 
-// AddRelayPeer adds a peer that can relay traffic to this peer
-func (p *PeerInfo) AddRelayPeer(relayIP net.IP) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	
-	// Check if already in list
-	for _, ip := range p.RelayPeers {
-		if ip.Equal(relayIP) {
-			return
-		}
-	}
-	
-	p.RelayPeers = append(p.RelayPeers, relayIP)
-}
-
 // GetQualityScore returns a quality score for this peer (0-150, higher is better)
 // Score above 100 indicates excellent quality (typically local connections)
 // Score 80-100 is good quality P2P
@@ -168,44 +179,44 @@ func (p *PeerInfo) AddRelayPeer(relayIP net.IP) {
 func (p *PeerInfo) GetQualityScore() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	// Quality scoring constants
 	const (
-		latencyPenaltyDivisor    = 10    // Divide latency by this to get penalty groups
-		latencyPenaltyMultiplier = 5     // Multiply penalty groups by this value
-		packetLossPenaltyScale   = 1000  // Scale packet loss to penalty points
-		p2pQualityBonus          = 20    // Bonus points for P2P connection
-		localConnectionBonus     = 30    // Bonus points for local network connection (highest priority)
-		serverRoutePenalty       = 30    // Penalty points for server routing
+		latencyPenaltyDivisor    = 10   // Divide latency by this to get penalty groups
+		latencyPenaltyMultiplier = 5    // Multiply penalty groups by this value
+		packetLossPenaltyScale   = 1000 // Scale packet loss to penalty points
+		p2pQualityBonus          = 20   // Bonus points for P2P connection
+		localConnectionBonus     = 30   // Bonus points for local network connection (highest priority)
+		serverRoutePenalty       = 30   // Penalty points for server routing
 	)
-	
+
 	// Base score
 	score := 100
-	
+
 	// Deduct for latency (every 10ms reduces score by 5)
 	latencyPenalty := int(p.Latency.Milliseconds() / latencyPenaltyDivisor * latencyPenaltyMultiplier)
 	score -= latencyPenalty
-	
+
 	// Deduct for packet loss (1% loss = 10 points)
 	lossPenalty := int(p.PacketLoss * packetLossPenaltyScale)
 	score -= lossPenalty
-	
+
 	// Bonus for direct P2P connection
 	if p.Connected {
 		score += p2pQualityBonus
 	}
-	
+
 	// Extra bonus for local network connection (highest priority)
 	// This ensures local connections are preferred over public NAT traversal
 	if p.IsLocalConnection {
 		score += localConnectionBonus
 	}
-	
+
 	// Penalty for going through server
 	if p.ThroughServer {
 		score -= serverRoutePenalty
 	}
-	
+
 	// Ensure score is in valid range
 	// Allow scores above 100 for local connection bonus to ensure proper prioritization
 	if score < 0 {
@@ -214,7 +225,7 @@ func (p *PeerInfo) GetQualityScore() int {
 	if score > 150 {
 		score = 150
 	}
-	
+
 	return score
 }
 
@@ -229,7 +240,7 @@ func (p *PeerInfo) IsStale(timeout time.Duration) bool {
 func (p *PeerInfo) Clone() *PeerInfo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	clone := &PeerInfo{
 		TunnelIP:          p.TunnelIP,
 		PublicAddr:        p.PublicAddr,
@@ -242,11 +253,13 @@ func (p *PeerInfo) Clone() *PeerInfo {
 		ThroughServer:     p.ThroughServer,
 		IsLocalConnection: p.IsLocalConnection,
 		RelayPeers:        make([]net.IP, len(p.RelayPeers)),
-		packetsSent:       p.packetsSent,
-		packetsReceived:   p.packetsReceived,
+		sendSeq:           p.sendSeq,
+		recvCount:         p.recvCount,
+		recvMaxSeq:        p.recvMaxSeq,
+		recvMinSeq:        p.recvMinSeq,
 		lastQualityCheck:  p.lastQualityCheck,
 	}
 	copy(clone.RelayPeers, p.RelayPeers)
-	
+
 	return clone
 }
