@@ -279,6 +279,28 @@ func (c *ConnRaw) recvLoop() {
 			}
 		}
 
+		if c.isConnected {
+			c.mu.Lock()
+			c.lastActivity = time.Now()
+			c.mu.Unlock()
+		}
+
+		if c.isConnected && flags&FIN != 0 {
+			c.mu.Lock()
+			c.ackNum = seq + 1
+			ackToSend := c.ackNum
+			seqToUse := c.seqNum
+			c.mu.Unlock()
+
+			if err := c.rawSocket.SendPacket(c.localIP, c.srcPort, c.remoteIP, c.dstPort,
+				seqToUse, ackToSend, ACK, c.buildTCPOptions(), nil); err != nil {
+				log.Printf("Failed to send ACK for FIN to %s:%d: %v", c.remoteIP, c.remotePort, err)
+			}
+
+			atomic.StoreInt32(&c.closed, 1)
+			return
+		}
+
 		// Update ack number and immediately acknowledge payload to keep TCP disguise realistic
 		if len(payload) > 0 {
 			c.mu.Lock()
@@ -298,10 +320,13 @@ func (c *ConnRaw) recvLoop() {
 		// 只在已连接状态下过滤payload=0的包
 		// 握手期间（!isConnected）需要处理SYN-ACK等控制包
 		if c.isConnected && len(payload) == 0 {
-			drops := atomic.AddUint64(&c.RecvDrops, 1)
-			if drops <= 5 || drops%100 == 0 {
-				log.Printf("📉 recvLoop ignored empty-payload packet count=%d remote=%s:%d flags=%02x seq=%d ack=%d",
-					drops, srcIP, srcPort, flags, seq, ack)
+			if flags&ACK != 0 {
+				continue
+			}
+			ignored := atomic.AddUint64(&c.RecvDrops, 1)
+			if ignored <= 5 || ignored%100 == 0 {
+				log.Printf("📉 recvLoop ignored zero-payload non-ACK packet count=%d remote=%s:%d flags=%02x seq=%d ack=%d",
+					ignored, srcIP, srcPort, flags, seq, ack)
 			}
 			continue
 		}
