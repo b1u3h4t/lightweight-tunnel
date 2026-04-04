@@ -108,21 +108,6 @@ func selectDarwinPcapDevice(localIP, remoteIP net.IP, remotePort uint16) string 
 		}
 	}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		if shouldUseDarwinPcapInterface(iface.Name, iface.Flags, addrs) {
-			return iface.Name
-		}
-	}
-
 	return ""
 }
 
