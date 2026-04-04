@@ -16,7 +16,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        iproute2 iptables iputils-ping libpcap0.8 procps net-tools tcpdump && \
+        iproute2 iptables iputils-ping libpcap0.8 procps net-tools tcpdump netcat-openbsd && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /lightweight-tunnel /usr/local/bin/lightweight-tunnel

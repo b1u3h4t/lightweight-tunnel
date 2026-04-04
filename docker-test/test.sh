@@ -44,6 +44,23 @@ run_test() {
     fi
 }
 
+nc_expect() {
+    local host="$1"
+    local port="$2"
+    local expected="$3"
+    local attempts="${4:-5}"
+    local out=""
+    local i
+    for i in $(seq 1 "$attempts"); do
+        out=$(nc -w 3 "$host" "$port" 2>/dev/null | tr -d '\r' || true)
+        if [ "$out" = "$expected" ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 # Ping helper: returns 0 if all packets received
 ping_test() {
     local host="$1"
@@ -113,6 +130,8 @@ if [ "$HAS_TUN" = true ]; then
     fi
 
     run_test "Ping ${PEER_LABEL} (${PEER_TUN}) via server relay" ping_test "$PEER_TUN"
+    run_test "NC server (${SERVER_TUN}:18080) via tunnel" nc_expect "$SERVER_TUN" 18080 "server-tunnel-ok"
+    run_test "NC ${PEER_LABEL} (${PEER_TUN}:18081) via server relay" nc_expect "$PEER_TUN" 18081 "client2-tunnel-ok"
 else
     # Docker network checks only
     info "Checking docker-network reachability..."
@@ -134,9 +153,11 @@ if [ "$HAS_TUN" = true ]; then
 
     # 5-packet connectivity
     run_test "${SELF_LABEL} -> ${PEER_LABEL}: 5 pings" ping_test "$PEER_TUN" 5
+    run_test "${SELF_LABEL} -> ${PEER_LABEL}: nc over tunnel" nc_expect "$PEER_TUN" 18081 "client2-tunnel-ok"
 
     # Also test round-trip to server
     run_test "${SELF_LABEL} -> server: 5 pings" ping_test "$SERVER_TUN" 5
+    run_test "${SELF_LABEL} -> server: nc over tunnel" nc_expect "$SERVER_TUN" 18080 "server-tunnel-ok"
 
     # Larger ping payload (1000 bytes to test MTU handling)
     run_test "${SELF_LABEL} -> ${PEER_LABEL}: large payload (1000B)" \
