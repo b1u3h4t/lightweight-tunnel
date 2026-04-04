@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,38 @@ import (
 )
 
 func darwinPcapBackendAvailable() bool { return true }
+
+func darwinTCPFlagsString(tcp *layers.TCP) string {
+	flags := make([]string, 0, 8)
+	if tcp.FIN {
+		flags = append(flags, "FIN")
+	}
+	if tcp.SYN {
+		flags = append(flags, "SYN")
+	}
+	if tcp.RST {
+		flags = append(flags, "RST")
+	}
+	if tcp.PSH {
+		flags = append(flags, "PSH")
+	}
+	if tcp.ACK {
+		flags = append(flags, "ACK")
+	}
+	if tcp.URG {
+		flags = append(flags, "URG")
+	}
+	if tcp.ECE {
+		flags = append(flags, "ECE")
+	}
+	if tcp.CWR {
+		flags = append(flags, "CWR")
+	}
+	if len(flags) == 0 {
+		return "NONE"
+	}
+	return strings.Join(flags, "|")
+}
 
 func initializeDarwinPcap(rs *RawSocket) {
 	device := selectDarwinPcapDevice()
@@ -88,7 +121,7 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 					rs.remoteIP, rs.remotePort,
 					ip.SrcIP, tcp.SrcPort,
 					ip.DstIP, tcp.DstPort,
-					tcp.Flags,
+					darwinTCPFlagsString(tcp),
 					len(tcp.Payload),
 				)
 			}
@@ -110,7 +143,7 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 					rs.localIP, rs.localPort,
 					rs.remoteIP, rs.remotePort,
 					len(tcp.Payload),
-					tcp.Flags,
+					darwinTCPFlagsString(tcp),
 				)
 			}
 		}
