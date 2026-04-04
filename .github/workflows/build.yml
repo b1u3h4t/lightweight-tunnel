@@ -1,85 +1,94 @@
-name: Build Lightweight Tunnel
+name: CI
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  build-linux:
+  test:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm64
+            suffix: linux-arm64
 
     steps:
-    # 1. 拉取代码
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    # 2. 配置 Go 环境
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
 
-    # 3. 编译
-    - name: Build Binary
-      run: |
-        go build -v -o lightweight-tunnel-linux-amd64 ./cmd/lightweight-tunnel
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build -v -ldflags="-s -w -X main.version=${{ github.sha }}" \
+            -o lightweight-tunnel-${{ matrix.suffix }} ./cmd/lightweight-tunnel
 
-    # 4. 上传打包结果
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: lightweight-tunnel-linux-amd64
-        path: lightweight-tunnel-linux-amd64
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightweight-tunnel-${{ matrix.suffix }}
+          path: lightweight-tunnel-${{ matrix.suffix }}
 
-  build-macos-amd64:
-    runs-on: macos-latest
+  build-macos:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+            suffix: macos-amd64
+          - runner: macos-14
+            goarch: arm64
+            suffix: macos-arm64
 
+    runs-on: ${{ matrix.runner }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
 
-    - name: Install dependencies
-      run: |
-        brew install libpcap
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -v -ldflags="-s -w -X main.version=${{ github.sha }}" \
+            -o lightweight-tunnel-${{ matrix.suffix }} ./cmd/lightweight-tunnel
 
-    - name: Build Binary
-      run: |
-        CGO_ENABLED=1 go build -v -o lightweight-tunnel-macos-amd64 ./cmd/lightweight-tunnel
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: lightweight-tunnel-macos-amd64
-        path: lightweight-tunnel-macos-amd64
-
-  build-macos-arm64:
-    runs-on: macos-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
-
-    - name: Install dependencies
-      run: |
-        brew install libpcap
-
-    - name: Build Binary
-      run: |
-        CGO_ENABLED=1 GOARCH=arm64 go build -v -o lightweight-tunnel-macos-arm64 ./cmd/lightweight-tunnel
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: lightweight-tunnel-macos-arm64
-        path: lightweight-tunnel-macos-arm64
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightweight-tunnel-${{ matrix.suffix }}
+          path: lightweight-tunnel-${{ matrix.suffix }}

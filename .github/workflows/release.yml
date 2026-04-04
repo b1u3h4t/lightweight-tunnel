@@ -1,81 +1,183 @@
-name: Release Lightweight Tunnel
+name: Release
 
 on:
-  release:
-    types: [created]
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build-and-release:
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            suffix: linux-amd64
-          - goos: linux
-            goarch: arm64
-            suffix: linux-arm64
-          - goos: linux
-            goarch: arm
-            goarm: '7'
-            suffix: linux-armv7
-          - goos: linux
-            goarch: arm
-            goarm: '6'
-            suffix: linux-armv6
-          - goos: linux
-            goarch: 386
-            suffix: linux-386
-          - goos: linux
-            goarch: mips
-            suffix: linux-mips
-          - goos: linux
-            goarch: mipsle
-            suffix: linux-mipsle
-
     steps:
-      # 1. Checkout code
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 2. Set up Go environment
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.24'
 
-      # 3. Build binary
-      - name: Build Binary
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm64
+            suffix: linux-arm64
+          - goarch: arm
+            goarm: '7'
+            suffix: linux-armv7
+          - goarch: arm
+            goarm: '6'
+            suffix: linux-armv6
+          - goarch: '386'
+            suffix: linux-386
+          - goarch: mips
+            suffix: linux-mips
+          - goarch: mipsle
+            suffix: linux-mipsle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
+          GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: '0'
         run: |
-          OUTPUT_NAME="lightweight-tunnel-${{ matrix.suffix }}"
-          
-          # Build
-          go build -v -ldflags="-s -w" -o "$OUTPUT_NAME" ./cmd/lightweight-tunnel
-          
-          # Compress
-          tar czf "${OUTPUT_NAME}.tar.gz" "$OUTPUT_NAME"
-          
-          # Calculate checksum
-          sha256sum "${OUTPUT_NAME}.tar.gz" > "${OUTPUT_NAME}.tar.gz.sha256"
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUTPUT="lightweight-tunnel-${{ matrix.suffix }}"
+          go build -v -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "$OUTPUT" ./cmd/lightweight-tunnel
+          tar czf "${OUTPUT}.tar.gz" "$OUTPUT"
+          sha256sum "${OUTPUT}.tar.gz" > "${OUTPUT}.tar.gz.sha256"
 
-      # 4. Upload to Release
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: release-${{ matrix.suffix }}
+          path: |
             lightweight-tunnel-${{ matrix.suffix }}.tar.gz
             lightweight-tunnel-${{ matrix.suffix }}.tar.gz.sha256
+
+  build-macos:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+            suffix: macos-amd64
+          - runner: macos-14
+            goarch: arm64
+            suffix: macos-arm64
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        env:
+          CGO_ENABLED: '1'
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUTPUT="lightweight-tunnel-${{ matrix.suffix }}"
+          go build -v -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "$OUTPUT" ./cmd/lightweight-tunnel
+          tar czf "${OUTPUT}.tar.gz" "$OUTPUT"
+          shasum -a 256 "${OUTPUT}.tar.gz" > "${OUTPUT}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: |
+            lightweight-tunnel-${{ matrix.suffix }}.tar.gz
+            lightweight-tunnel-${{ matrix.suffix }}.tar.gz.sha256
+
+  publish:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          TAG="${GITHUB_REF_NAME}"
+
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "## What's Changed"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s (%h)" --no-merges
+            else
+              git log --pretty=format:"- %s (%h)" --no-merges -20
+            fi
+            echo ""
+            echo ""
+            echo "## Downloads"
+            echo ""
+            echo "| Platform | Architecture | File |"
+            echo "|----------|-------------|------|"
+            echo "| Linux | amd64 | \`lightweight-tunnel-linux-amd64.tar.gz\` |"
+            echo "| Linux | arm64 | \`lightweight-tunnel-linux-arm64.tar.gz\` |"
+            echo "| Linux | armv7 | \`lightweight-tunnel-linux-armv7.tar.gz\` |"
+            echo "| Linux | armv6 | \`lightweight-tunnel-linux-armv6.tar.gz\` |"
+            echo "| Linux | 386 | \`lightweight-tunnel-linux-386.tar.gz\` |"
+            echo "| Linux | mips | \`lightweight-tunnel-linux-mips.tar.gz\` |"
+            echo "| Linux | mipsle | \`lightweight-tunnel-linux-mipsle.tar.gz\` |"
+            echo "| macOS | amd64 (Intel) | \`lightweight-tunnel-macos-amd64.tar.gz\` |"
+            echo "| macOS | arm64 (Apple Silicon) | \`lightweight-tunnel-macos-arm64.tar.gz\` |"
+            echo ""
+            echo "### Verify checksums"
+            echo "\`\`\`bash"
+            echo "sha256sum -c lightweight-tunnel-linux-amd64.tar.gz.sha256"
+            echo "\`\`\`"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            lightweight-tunnel-*.tar.gz
+            lightweight-tunnel-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
