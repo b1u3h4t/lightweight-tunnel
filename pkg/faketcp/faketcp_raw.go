@@ -17,6 +17,7 @@ import (
 
 const (
 	rawRecvQueueSize = 4096 // large buffer to avoid drops under high throughput
+	rawReadPollUsec  = 2000
 )
 
 // ConnRaw represents a fake TCP connection using raw sockets (真正的TCP伪装)
@@ -234,8 +235,7 @@ func (c *ConnRaw) recvLoop() {
 		default:
 		}
 
-		// Set read timeout to allow checking stopCh
-		c.rawSocket.SetReadTimeout(0, 100000) // 100ms = 100000 microseconds
+		c.rawSocket.SetReadTimeout(0, rawReadPollUsec)
 
 		srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, err := c.rawSocket.RecvPacket(buf)
 		if err != nil {
@@ -638,7 +638,7 @@ func (l *ListenerRaw) acceptLoop() {
 		default:
 		}
 
-		l.rawSocket.SetReadTimeout(0, 100000) // 100ms
+		l.rawSocket.SetReadTimeout(0, rawReadPollUsec)
 		srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, err := l.rawSocket.RecvPacket(buf)
 		if err != nil {
 			continue

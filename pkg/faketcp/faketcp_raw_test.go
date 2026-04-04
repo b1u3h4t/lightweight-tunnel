@@ -80,3 +80,15 @@ func TestListenerRawChooseReplyIP(t *testing.T) {
 		})
 	}
 }
+
+func TestRawReadPollUsecStaysLowForLatency(t *testing.T) {
+	t.Parallel()
+
+	if rawReadPollUsec <= 0 {
+		t.Fatalf("rawReadPollUsec must stay positive, got %d", rawReadPollUsec)
+	}
+
+	if rawReadPollUsec > 5000 {
+		t.Fatalf("rawReadPollUsec too high for low-latency tunnel traffic: %d", rawReadPollUsec)
+	}
+}
