@@ -5,9 +5,12 @@ import (
 	"log"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
+
+const darwinPFAnchorRoot = "lightweight-tunnel"
 
 // IPTablesManager manages iptables rules for raw socket TCP
 type IPTablesManager struct {
@@ -24,11 +27,11 @@ func NewIPTablesManager() *IPTablesManager {
 
 // AddRuleForPort adds an iptables rule to drop RST packets for a specific port
 // This is essential for raw socket TCP to work properly
-// On macOS, this is a no-op as the kernel doesn't send RST packets in the same way
 func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
 	if isMacOS() {
-		log.Printf("macOS: skipping iptables rule for port %d (not required)", port)
-		return nil
+		anchor := darwinAnchorForPort(port, isServer)
+		rule := darwinPFRuleForPort(port)
+		return m.addDarwinRule(anchor, rule)
 	}
 
 	m.mu.Lock()
@@ -69,11 +72,11 @@ func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
 }
 
 // AddRuleForConnection adds iptables rules for a specific connection (both directions)
-// On macOS, this is a no-op
 func (m *IPTablesManager) AddRuleForConnection(localIP string, localPort uint16, remoteIP string, remotePort uint16, isServer bool) error {
 	if isMacOS() {
-		log.Printf("macOS: skipping iptables rule for connection %s:%d -> %s:%d (not required)", localIP, localPort, remoteIP, remotePort)
-		return nil
+		anchor := darwinAnchorForConnection(localPort, remoteIP, remotePort, isServer)
+		rule := darwinPFRuleForConnection(localPort, remoteIP, remotePort)
+		return m.addDarwinRule(anchor, rule)
 	}
 
 	m.mu.Lock()
@@ -120,12 +123,29 @@ func (m *IPTablesManager) AddRuleForConnection(localIP string, localPort uint16,
 }
 
 // RemoveAllRules removes all iptables rules added by this manager
-// On macOS, this is a no-op
 func (m *IPTablesManager) RemoveAllRules() error {
 	if isMacOS() {
 		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		var errors []string
+		for _, anchor := range m.rules {
+			cmd := exec.Command("pfctl", "-a", anchor, "-F", "rules")
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("failed to flush PF anchor '%s': %v, output: %s", anchor, err, output))
+				continue
+			}
+
+			log.Printf("Removed macOS PF rules: pfctl -a %s -F rules", anchor)
+		}
+
 		m.rules = make([]string, 0)
-		m.mu.Unlock()
+
+		if len(errors) > 0 {
+			return fmt.Errorf("errors removing PF rules: %s", strings.Join(errors, "; "))
+		}
+
 		return nil
 	}
 
@@ -186,12 +206,17 @@ func isMacOS() bool {
 }
 
 // CheckIPTablesAvailable checks if iptables is available
-// On macOS, iptables is not available but raw sockets work without it
 func CheckIPTablesAvailable() error {
-	// macOS doesn't have iptables, but raw sockets work without it
-	// The kernel doesn't send RST packets in the same way as Linux
 	if isMacOS() {
-		log.Printf("Running on macOS: iptables not required for raw sockets")
+		cmd := exec.Command("pfctl", "-s", "info")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("pfctl not available: %v, output: %s", err, output)
+		}
+		if !darwinPFEnabled(string(output)) {
+			return fmt.Errorf("pf is disabled; enable it first with 'sudo pfctl -E' before starting rawtcp on macOS")
+		}
+		log.Printf("Running on macOS: PF available for raw socket RST suppression")
 		return nil
 	}
 
@@ -201,6 +226,72 @@ func CheckIPTablesAvailable() error {
 		return fmt.Errorf("iptables not available: %v, output: %s", err, output)
 	}
 	return nil
+}
+
+func (m *IPTablesManager) addDarwinRule(anchor string, rule string) error {
+	if err := ensureDarwinPFEnabled(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cmd := exec.Command("pfctl", "-a", anchor, "-f", "-")
+	cmd.Stdin = strings.NewReader(rule + "\n")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to load macOS PF rule: %v, output: %s", err, output)
+	}
+
+	m.rules = append(m.rules, anchor)
+	log.Printf("Added macOS PF rule in anchor %s: %s", anchor, rule)
+	return nil
+}
+
+func ensureDarwinPFEnabled() error {
+	statusCmd := exec.Command("pfctl", "-s", "info")
+	statusOutput, statusErr := statusCmd.CombinedOutput()
+	if statusErr != nil {
+		return fmt.Errorf("failed to query macOS PF status: %v, output: %s", statusErr, statusOutput)
+	}
+	if darwinPFEnabled(string(statusOutput)) {
+		return nil
+	}
+	return fmt.Errorf("macOS PF is disabled; run 'sudo pfctl -E' and restart lightweight-tunnel")
+}
+
+func darwinPFRuleForPort(port uint16) string {
+	return fmt.Sprintf("block drop out quick proto tcp from any port %d to any flags R/R", port)
+}
+
+func darwinPFRuleForConnection(localPort uint16, remoteIP string, remotePort uint16) string {
+	return fmt.Sprintf("block drop out quick proto tcp from any port %d to %s port %d flags R/R", localPort, remoteIP, remotePort)
+}
+
+func darwinAnchorForPort(port uint16, isServer bool) string {
+	role := "client"
+	if isServer {
+		role = "server"
+	}
+	return fmt.Sprintf("%s/%s-port-%d", darwinPFAnchorRoot, role, port)
+}
+
+func darwinAnchorForConnection(localPort uint16, remoteIP string, remotePort uint16, isServer bool) string {
+	role := "client"
+	if isServer {
+		role = "server"
+	}
+	return fmt.Sprintf("%s/%s-conn-%d-%s-%s", darwinPFAnchorRoot, role, localPort, sanitizeAnchorComponent(remoteIP), strconv.FormatUint(uint64(remotePort), 10))
+}
+
+func sanitizeAnchorComponent(value string) string {
+	value = strings.ReplaceAll(value, ".", "_")
+	value = strings.ReplaceAll(value, ":", "_")
+	return value
+}
+
+func darwinPFEnabled(output string) bool {
+	return strings.Contains(output, "Status: Enabled")
 }
 
 // ClearAllRules removes all rules (static method for cleanup)

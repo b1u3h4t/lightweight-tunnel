@@ -198,6 +198,37 @@ ip route get 10.233.0.1
 
 ## 故障排查
 
+### macOS rawtcp：握手成功但 ping 丢包很高
+
+如果 macOS 客户端已经能握手成功，但 `ping 10.233.0.1` 仍然高丢包，先不要改 FEC。保持现有 `fec_data` / `fec_parity` 不变，优先检查本机是否在向 rawtcp 流量发 TCP RST。
+
+操作步骤：
+
+```bash
+# 1) 确认 PF 已启用
+sudo pfctl -s info
+sudo pfctl -E
+
+# 2) 从日志或抓包找到 rawtcp 客户端本地源端口，下面以 22535 为例
+
+# 3) 加载只针对这条连接的 RST 拦截规则
+cat <<'EOF' | sudo pfctl -a lightweight-tunnel/client-22535 -f -
+block drop out quick proto tcp from any port 22535 to 49.232.146.200 port 9000 flags R/R
+EOF
+
+# 4) 验证规则
+sudo pfctl -a lightweight-tunnel/client-22535 -s rules
+
+# 5) 抓包确认客户端外网网卡上不再持续出现 RST
+sudo tcpdump -nn -i en0 'tcp[tcpflags] & tcp-rst != 0 and host 49.232.146.200 and port 9000'
+```
+
+删除规则：
+
+```bash
+sudo pfctl -a lightweight-tunnel/client-22535 -F rules
+```
+
 ### 启动失败："permission denied"
 ```bash
 # 需要 root 权限

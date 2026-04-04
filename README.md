@@ -876,28 +876,81 @@ macOS 对 Raw Socket 有更严格的限制：
 
 macOS 使用 pf (packet filter) 防火墙，而不是 iptables。
 
-**查看 pf 状态**:
+Raw TCP 在 macOS 上不只是“放行 9000 端口”这么简单。当前必须额外拦截 **本机内核自动发出的 TCP RST**，否则会出现：握手成功，但 steady-state 流量大量丢包。
+
+如果你已经有客户端在线，**不要因为排障去改 FEC**。先保持现有 `fec_data` / `fec_parity` 不变，只处理 PF。
+
+**操作步骤（不关闭 FEC）**:
+
+1. 查看当前 PF 状态：
+
 ```bash
 sudo pfctl -s info
 ```
 
-**允许隧道流量（如果需要）**:
+如果看到 `Status: Disabled`，先启用：
+
 ```bash
-# 创建临时规则文件
-cat > /etc/pf.anchors/lightweight-tunnel << EOF
-# 允许隧道端口 9000
-pass in quick proto tcp from any to any port 9000
-pass out quick proto tcp from any to any port 9000
+sudo pfctl -E
+```
+
+2. 找到当前 rawtcp 客户端实际使用的本地源端口。
+
+程序日志里会打印类似：
+
+```text
+Raw TCP connection established: 192.168.1.8:22535 -> 49.232.146.200:9000
+```
+
+这里的 `22535` 就是要拦截 RST 的本地源端口。
+
+也可以直接抓外网网卡确认：
+
+```bash
+sudo tcpdump -nn -i en0 'tcp and host 49.232.146.200 and port 9000'
+```
+
+3. 加载临时 PF 规则，只拦截这个 rawtcp 连接的 **outbound TCP RST**：
+
+```bash
+cat <<'EOF' | sudo pfctl -a lightweight-tunnel/client-22535 -f -
+block drop out quick proto tcp from any port 22535 to 49.232.146.200 port 9000 flags R/R
 EOF
-
-# 加载规则
-sudo pfctl -e -f /etc/pf.anchors/lightweight-tunnel
 ```
 
-**禁用防火墙（测试用）**:
+把上面的 `22535` 替换成你的实际本地源端口。
+
+4. 验证规则已经生效：
+
 ```bash
-sudo pfctl -d
+sudo pfctl -a lightweight-tunnel/client-22535 -s rules
 ```
+
+应看到：
+
+```text
+block drop out quick proto tcp from any port 22535 to 49.232.146.200 port 9000 flags R/R
+```
+
+5. 重启客户端，再次抓包确认外网网卡上不再持续出现客户端自己发出的 `Flags [R]`：
+
+```bash
+sudo tcpdump -nn -i en0 'tcp[tcpflags] & tcp-rst != 0 and host 49.232.146.200 and port 9000'
+```
+
+如果修复正确，这里的 RST 会显著减少或消失，同时 `ping 10.233.0.1` 丢包率会明显下降。
+
+**删除这条临时规则**:
+
+```bash
+sudo pfctl -a lightweight-tunnel/client-22535 -F rules
+```
+
+**注意事项**:
+
+- 这条 PF 规则只影响指定的本地源端口和服务端 `49.232.146.200:9000`，不会改你的 FEC。
+- 每次客户端重连后，本地源端口可能变化。如果端口变了，需要按新的端口重新加载规则。
+- 当前仓库里的 macOS 支持会在启动时检查 PF 是否已启用；如果 PF 是 Disabled，会直接报错提示先执行 `sudo pfctl -E`。
 
 #### Q14: macOS TUN 设备名称
 

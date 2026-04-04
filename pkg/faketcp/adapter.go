@@ -138,7 +138,7 @@ func ModeString(mode Mode) string {
 	case ModeUDP:
 		return "UDP (fake TCP headers in payload)"
 	case ModeRaw:
-		return "Raw Socket (real TCP packets with iptables)"
+		return "Raw Socket (real TCP packets with kernel RST suppression)"
 	default:
 		return fmt.Sprintf("Unknown mode (%d)", mode)
 	}
@@ -155,7 +155,7 @@ func CheckRawSocketSupport() error {
 
 	// Check iptables availability
 	if err := iptables.CheckIPTablesAvailable(); err != nil {
-		return fmt.Errorf("iptables not available: %v", err)
+		return fmt.Errorf("firewall RST suppression backend not available: %v", err)
 	}
 
 	return nil

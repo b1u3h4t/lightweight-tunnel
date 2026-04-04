@@ -461,16 +461,15 @@ func (c *ConnRaw) Close() error {
 	close(c.stopCh)
 	c.wg.Wait()
 
-	// 只有拥有资源的连接才关闭socket和删除iptables规则
+	// 只有拥有资源的连接才关闭socket和删除RST抑制规则
 	if c.ownsResources {
 		// Close raw socket
 		if err := c.rawSocket.Close(); err != nil {
 			log.Printf("Error closing raw socket: %v", err)
 		}
 
-		// Remove iptables rules
 		if err := c.iptablesMgr.RemoveAllRules(); err != nil {
-			log.Printf("Error removing iptables rules: %v", err)
+			log.Printf("Error removing RST suppression rules: %v", err)
 		}
 	}
 
@@ -930,9 +929,8 @@ func (l *ListenerRaw) Close() error {
 		log.Printf("Timeout waiting for listener goroutines to stop; continuing shutdown")
 	}
 
-	// Remove iptables rules
 	if err := l.iptablesMgr.RemoveAllRules(); err != nil {
-		log.Printf("Error removing iptables rules: %v", err)
+		log.Printf("Error removing RST suppression rules: %v", err)
 	}
 
 	// Close raw socket
