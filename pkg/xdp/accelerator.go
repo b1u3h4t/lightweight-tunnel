@@ -3,6 +3,7 @@ package xdp
 import (
 	"encoding/binary"
 	"sync"
+	"time"
 )
 
 const (
@@ -12,6 +13,11 @@ const (
 	ipv4Version      = 4
 	ipv4MinHeaderLen = 20
 	minPortBytes     = 4
+
+	// cacheFlushInterval controls how often stale flow decisions are evicted.
+	// Without periodic flushing, the cache grows unbounded and decisions
+	// become stale after network changes.
+	cacheFlushInterval = 60 * time.Second
 )
 
 // Accelerator provides a lightweight, user-space approximation of an
@@ -20,12 +26,43 @@ const (
 type Accelerator struct {
 	enabled bool
 	cache   sync.Map
+	stopCh  chan struct{}
+	once    sync.Once
 }
 
 // NewAccelerator creates a new accelerator. When disabled it simply
 // delegates classification to the provided fallback.
 func NewAccelerator(enabled bool) *Accelerator {
-	return &Accelerator{enabled: enabled}
+	a := &Accelerator{
+		enabled: enabled,
+		stopCh:  make(chan struct{}),
+	}
+	if enabled {
+		go a.periodicFlush()
+	}
+	return a
+}
+
+// periodicFlush clears the flow cache on a fixed interval to prevent
+// unbounded growth and stale entries.
+func (a *Accelerator) periodicFlush() {
+	ticker := time.NewTicker(cacheFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			a.Flush()
+		}
+	}
+}
+
+// Stop shuts down the background flush goroutine. Safe to call multiple times.
+func (a *Accelerator) Stop() {
+	a.once.Do(func() {
+		close(a.stopCh)
+	})
 }
 
 // Classify returns whether the packet should bypass outer encryption.
