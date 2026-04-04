@@ -48,7 +48,7 @@ type Tuning struct {
 }
 
 var tunables = Tuning{
-	ListenerQueueSize:   8,
+	ListenerQueueSize:   64,
 	HandshakeMaxErrors:  2,
 	WritePacingMinDelay: 0,
 }
@@ -110,6 +110,7 @@ type Conn struct {
 	recvQueue   chan []byte // for listener connections
 	closed      int32       // atomic flag: 1 if connection is closed, 0 otherwise
 	closeOnce   sync.Once   // ensures channel is closed only once
+	RecvDrops   uint64      // atomic; packets dropped when recvQueue is full
 }
 
 // Listener accepts and dispatches fake TCP connections
@@ -267,6 +268,7 @@ func (l *Listener) enqueuePayload(connKey string, conn *Conn, tcpHeader *TCPHead
 	select {
 	case conn.recvQueue <- payload:
 	default:
+		atomic.AddUint64(&conn.RecvDrops, 1)
 		log.Printf("WARNING: Receive queue full for %s, dropping packet (%d bytes)", connKey, len(payload))
 	}
 }

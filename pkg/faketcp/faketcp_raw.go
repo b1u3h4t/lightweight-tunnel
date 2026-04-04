@@ -41,6 +41,7 @@ type ConnRaw struct {
 	isListener    bool      // true表示这是listener接受的连接，不需要启动recvLoop
 	ownsResources bool      // true表示拥有rawSocket和iptablesMgr的所有权，关闭时需要清理
 	lastActivity  time.Time // Last time this connection had activity (for cleanup)
+	RecvDrops     uint64    // atomic; packets dropped when recvQueue is full
 }
 
 // NewConnRaw creates a new raw socket connection
@@ -303,6 +304,7 @@ func (c *ConnRaw) recvLoop() {
 			case c.recvQueue <- fullData:
 			default:
 				// Queue full, drop packet
+				atomic.AddUint64(&c.RecvDrops, 1)
 			}
 		}
 	}
@@ -528,6 +530,7 @@ type ListenerRaw struct {
 	acceptQueue chan *ConnRaw
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
+	RecvDrops   uint64 // atomic; packets dropped when existing conn recvQueue is full
 }
 
 const (
@@ -790,6 +793,7 @@ func (l *ListenerRaw) acceptLoop() {
 				case conn.recvQueue <- fullData:
 				default:
 					// 队列满，丢弃
+					atomic.AddUint64(&l.RecvDrops, 1)
 				}
 			}
 			// FIN/RST包不需要放入queue，连接关闭会由其他机制处理
