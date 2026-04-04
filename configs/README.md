@@ -171,6 +171,48 @@ Raw TCP 模式不会在 `ss -lntp` 或 `netstat -tulnp` 里显示常规 `LISTEN 
 sudo tcpdump -nn -i eth0 'tcp port 9000'
 ```
 
+## tunnel_addr 选择建议
+
+`tunnel_addr` 必须使用 RFC1918 私网段。
+
+不要使用：
+
+- 公网地址
+- `100.64.0.0/10` CGNAT 共享地址段
+- 任何你本机默认路由可能真实到达的地址
+
+错误示例：
+
+```json
+"tunnel_addr": "100.0.0.20/24"
+```
+
+这会导致在 `tun0` 路由没有正确安装时，测试流量直接走物理网卡，误以为“隧道很慢”，实际上测到的是外部网络 RTT。
+
+推荐示例：
+
+```json
+"tunnel_addr": "10.233.0.20/24"
+```
+
+服务端可配：
+
+```json
+"tunnel_addr": "10.233.0.1/24"
+```
+
+验证命令：
+
+```bash
+ip route get 10.233.0.1
+```
+
+应看到：
+
+```text
+10.233.0.1 dev tun0 ...
+```
+
 ## 参考资料
 
 - 主README：[../README.md](../README.md)
