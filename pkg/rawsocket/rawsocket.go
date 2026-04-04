@@ -416,9 +416,8 @@ func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstP
 	// Build TCP header (without checksum first)
 	tcpHeader := BuildTCPHeader(srcPort, dstPort, seq, ack, flags, 65535, tcpOptions)
 
-	// Use the local IP from the socket if available, otherwise use the provided srcIP
 	ipSrc := srcIP
-	if rs.localIP != nil {
+	if ipSrc == nil {
 		ipSrc = rs.localIP
 	}
 

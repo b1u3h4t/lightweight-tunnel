@@ -1207,7 +1207,7 @@ func (t *Tunnel) startServer() error {
 	mode := faketcp.GetMode()
 	log.Printf("Using %s for firewall bypass", faketcp.ModeString(mode))
 
-	listener, err := faketcp.ListenWithMode(t.config.LocalAddr, mode)
+	listener, err := faketcp.ListenWithModeAndReplySource(t.config.LocalAddr, t.config.ReplySourceIP, mode)
 	if err != nil {
 		return err
 	}

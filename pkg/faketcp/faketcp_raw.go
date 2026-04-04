@@ -523,6 +523,7 @@ func randomUint32Value() uint32 {
 type ListenerRaw struct {
 	rawSocket   *rawsocket.RawSocket
 	localIP     net.IP
+	replyIP     net.IP
 	localPort   uint16
 	connMap     map[string]*ConnRaw
 	mu          sync.RWMutex
@@ -544,6 +545,20 @@ const (
 
 // ListenRaw creates a raw socket listener
 func ListenRaw(addr string) (*ListenerRaw, error) {
+	return ListenRawWithReplySource(addr, "")
+}
+
+func (l *ListenerRaw) chooseReplyIP(dstIP net.IP) net.IP {
+	if l.replyIP != nil {
+		return l.replyIP
+	}
+	if l.localIP != nil && !l.localIP.Equal(net.IPv4zero) {
+		return l.localIP
+	}
+	return dstIP
+}
+
+func ListenRawWithReplySource(addr string, replySourceIP string) (*ListenerRaw, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address: %v", err)
@@ -558,6 +573,18 @@ func ListenRaw(addr string) (*ListenerRaw, error) {
 			return nil, fmt.Errorf("invalid IP address")
 		}
 		localIP = localIP.To4()
+	}
+
+	var replyIP net.IP
+	if replySourceIP != "" {
+		replyIP = net.ParseIP(replySourceIP)
+		if replyIP == nil {
+			return nil, fmt.Errorf("invalid reply source IP")
+		}
+		replyIP = replyIP.To4()
+		if replyIP == nil {
+			return nil, fmt.Errorf("reply source IP must be IPv4")
+		}
 	}
 
 	var localPort uint16
@@ -579,6 +606,7 @@ func ListenRaw(addr string) (*ListenerRaw, error) {
 	listener := &ListenerRaw{
 		rawSocket:   rawSock,
 		localIP:     localIP,
+		replyIP:     replyIP,
 		localPort:   localPort,
 		connMap:     make(map[string]*ConnRaw),
 		iptablesMgr: iptablesMgr,
@@ -636,10 +664,11 @@ func (l *ListenerRaw) acceptLoop() {
 		// 1. 处理新连接的SYN
 		if !exists && (flags&SYN != 0) && (flags&ACK == 0) {
 			isn, _ := randomUint32()
+			replyIP := l.chooseReplyIP(dstIP)
 
 			newConn := &ConnRaw{
 				rawSocket:     l.rawSocket,
-				localIP:       dstIP,
+				localIP:       replyIP,
 				localPort:     dstPort,
 				remoteIP:      srcIP,
 				remotePort:    srcPort,
@@ -658,7 +687,7 @@ func (l *ListenerRaw) acceptLoop() {
 
 			// Send SYN-ACK
 			tcpOptions := newConn.buildTCPOptions()
-			err := l.rawSocket.SendPacket(dstIP, dstPort, srcIP, srcPort,
+			err := l.rawSocket.SendPacket(replyIP, dstPort, srcIP, srcPort,
 				newConn.seqNum, newConn.ackNum, SYN|ACK, tcpOptions, nil)
 			if err != nil {
 				l.mu.Unlock()

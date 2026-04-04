@@ -9,9 +9,10 @@ import (
 
 // Config holds the tunnel configuration
 type Config struct {
-	Mode               string   `json:"mode"`                 // "client" or "server"
-	Transport          string   `json:"transport"`            // "rawtcp" only (true TCP disguise, requires root)
-	LocalAddr          string   `json:"local_addr"`           // Local address to listen on
+	Mode               string   `json:"mode"`       // "client" or "server"
+	Transport          string   `json:"transport"`  // "rawtcp" only (true TCP disguise, requires root)
+	LocalAddr          string   `json:"local_addr"` // Local address to listen on
+	ReplySourceIP      string   `json:"reply_source_ip"`
 	RemoteAddr         string   `json:"remote_addr"`          // Remote address to connect to (client mode)
 	TunnelAddr         string   `json:"tunnel_addr"`          // Tunnel network address (e.g., "10.0.0.1/24")
 	MTU                int      `json:"mtu"`                  // MTU size (0 = auto-detect)
@@ -58,29 +59,30 @@ type Config struct {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Mode:                "server",
-		Transport:           "rawtcp", // Fixed to rawtcp for true TCP disguise
-		LocalAddr:           "0.0.0.0:9000",
-		RemoteAddr:          "",
-		TunnelAddr:          "10.0.0.1/24",
-		MTU:                 1400,
-		FECDataShards:       10,
-		FECParityShards:     3,
-		Timeout:             30,
-		KeepaliveInterval:   5, // Reduced from 10 to 5 seconds for faster detection of connection issues
-		SendQueueSize:       10000, // Increased to 10000 to prevent queue full errors during high bandwidth testing
-		RecvQueueSize:       10000, // Increased to 10000 to handle burst traffic during iperf3 testing
-		TunName:             "",
-		Routes:              []string{},
-		ConfigPushInterval:  0,
-		MultiClient:         true,
-		MaxClients:          100,
-		ClientIsolation:     false,
-		P2PEnabled:          true,
-		P2PPort:             0, // Auto-select
-		EnableMeshRouting:   true,
-		MaxHops:             3,
-		RouteUpdateInterval: 30,
+		Mode:                 "server",
+		Transport:            "rawtcp", // Fixed to rawtcp for true TCP disguise
+		LocalAddr:            "0.0.0.0:9000",
+		ReplySourceIP:        "",
+		RemoteAddr:           "",
+		TunnelAddr:           "10.0.0.1/24",
+		MTU:                  1400,
+		FECDataShards:        10,
+		FECParityShards:      3,
+		Timeout:              30,
+		KeepaliveInterval:    5,     // Reduced from 10 to 5 seconds for faster detection of connection issues
+		SendQueueSize:        10000, // Increased to 10000 to prevent queue full errors during high bandwidth testing
+		RecvQueueSize:        10000, // Increased to 10000 to handle burst traffic during iperf3 testing
+		TunName:              "",
+		Routes:               []string{},
+		ConfigPushInterval:   0,
+		MultiClient:          true,
+		MaxClients:           100,
+		ClientIsolation:      false,
+		P2PEnabled:           true,
+		P2PPort:              0, // Auto-select
+		EnableMeshRouting:    true,
+		MaxHops:              3,
+		RouteUpdateInterval:  30,
 		P2PTimeout:           5,
 		EnableNATDetection:   true,
 		EnableXDP:            true,
@@ -112,7 +114,7 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	// Set defaults for missing fields
-	if config.MTU == 0 {
+	if _, exists := rawConfig["mtu"]; !exists {
 		config.MTU = 1400
 	}
 	if config.FECDataShards == 0 {
@@ -201,6 +203,9 @@ func SaveConfig(filename string, config *Config) error {
 	// Server-specific fields
 	if config.Mode == "server" {
 		minimalConfig["local_addr"] = config.LocalAddr
+		if config.ReplySourceIP != "" {
+			minimalConfig["reply_source_ip"] = config.ReplySourceIP
+		}
 	}
 
 	// Client-specific fields

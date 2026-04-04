@@ -114,8 +114,12 @@ func DialWithMode(remoteAddr string, timeout time.Duration, mode Mode) (ConnAdap
 
 // ListenWithMode creates a listener using specified mode
 func ListenWithMode(addr string, mode Mode) (ListenerAdapter, error) {
+	return ListenWithModeAndReplySource(addr, "", mode)
+}
+
+func ListenWithModeAndReplySource(addr string, replySourceIP string, mode Mode) (ListenerAdapter, error) {
 	if mode == ModeRaw {
-		listener, err := ListenRaw(addr)
+		listener, err := ListenRawWithReplySource(addr, replySourceIP)
 		if err != nil {
 			return nil, err
 		}
@@ -148,11 +152,11 @@ func CheckRawSocketSupport() error {
 		return fmt.Errorf("raw socket not supported: %v (需要root权限)", err)
 	}
 	testSock.Close()
-	
+
 	// Check iptables availability
 	if err := iptables.CheckIPTablesAvailable(); err != nil {
 		return fmt.Errorf("iptables not available: %v", err)
 	}
-	
+
 	return nil
 }

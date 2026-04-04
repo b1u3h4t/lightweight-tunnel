@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,6 +25,7 @@ func main() {
 	// Transport mode is now fixed to rawtcp only
 	// transport flag removed - always use rawtcp mode for true TCP disguise
 	localAddr := flag.String("l", "0.0.0.0:9000", "Local address to listen on")
+	replySourceIP := flag.String("reply-source-ip", "", "Server raw TCP reply source IP for cloud NAT/EIP deployments")
 	remoteAddr := flag.String("r", "", "Remote address to connect to (client mode)")
 	tunnelAddr := flag.String("t", "10.0.0.1/24", "Tunnel IP address and netmask")
 	mtu := flag.Int("mtu", 1400, "MTU size")
@@ -85,6 +87,7 @@ func main() {
 			Mode:               *mode,
 			Transport:          "rawtcp", // Fixed to rawtcp mode only
 			LocalAddr:          *localAddr,
+			ReplySourceIP:      *replySourceIP,
 			RemoteAddr:         *remoteAddr,
 			TunnelAddr:         *tunnelAddr,
 			MTU:                *mtu,
@@ -186,16 +189,27 @@ func validateConfig(cfg *config.Config) error {
 		return fmt.Errorf("remote address required in client mode")
 	}
 
+	if cfg.Mode == "client" && cfg.ReplySourceIP != "" {
+		return fmt.Errorf("reply_source_ip is server-only")
+	}
+
 	if cfg.TunnelAddr == "" {
 		return fmt.Errorf("tunnel address required")
 	}
 
-	if cfg.MTU < 500 || cfg.MTU > 9000 {
-		return fmt.Errorf("MTU must be between 500 and 9000")
+	if cfg.MTU != 0 && (cfg.MTU < 500 || cfg.MTU > 9000) {
+		return fmt.Errorf("MTU must be 0 (auto) or between 500 and 9000")
 	}
 
 	if cfg.FECDataShards < 1 || cfg.FECParityShards < 1 {
 		return fmt.Errorf("FEC shards must be positive")
+	}
+
+	if cfg.ReplySourceIP != "" {
+		ip := net.ParseIP(cfg.ReplySourceIP)
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("reply_source_ip must be a valid IPv4 address")
+		}
 	}
 
 	return nil
@@ -206,6 +220,7 @@ func generateConfigFile(filename string) error {
 	serverCfg := &config.Config{
 		Mode:               "server",
 		LocalAddr:          "0.0.0.0:9000",
+		ReplySourceIP:      "",
 		TunnelAddr:         "10.0.0.1/24",
 		Key:                "请修改为您的强密钥",
 		MTU:                0, // 0 = auto-detect
