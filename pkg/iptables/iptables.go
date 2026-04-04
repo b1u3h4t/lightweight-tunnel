@@ -36,10 +36,11 @@ func (m *IPTablesManager) AddRuleForPort(port uint16, isServer bool) error {
 
 	var rule string
 	if isServer {
-		// Server: drop RST packets sent by kernel in response to raw TCP packets
-		// Match TCP packets destined to port 9000 with RST flag set
-		// This catches RST packets kernel sends when it doesn't recognize our raw TCP sessions
-		rule = fmt.Sprintf("OUTPUT -p tcp --dport %d --tcp-flags RST RST -j DROP", port)
+		// Server: drop RST packets sent by kernel in response to inbound raw TCP packets.
+		// Those outbound kernel-generated RSTs use the listening port as SOURCE port,
+		// and the client ephemeral port as destination port.
+		// Matching --sport <listen-port> is therefore the correct suppression rule.
+		rule = fmt.Sprintf("OUTPUT -p tcp --sport %d --tcp-flags RST RST -j DROP", port)
 	} else {
 		// Client: drop RST packets sent by kernel for our outgoing raw TCP connections
 		// Match TCP packets from our source port with RST flag set
