@@ -5,13 +5,17 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
+	"sync/atomic"
 )
 
 // Cipher provides encryption and decryption using AES-GCM
 type Cipher struct {
-	aead cipher.AEAD
+	aead    cipher.AEAD
+	prefix  [4]byte // random prefix set at init time, unique per Cipher instance
+	counter uint64  // atomic counter for nonce generation; combined with prefix to form unique nonce
 }
 
 // NewCipher creates a new cipher from a key string
@@ -36,16 +40,23 @@ func NewCipher(key string) (*Cipher, error) {
 		return nil, err
 	}
 
-	return &Cipher{aead: aead}, nil
+	c := &Cipher{aead: aead}
+
+	// Generate a random 4-byte prefix for nonce uniqueness across restarts
+	if _, err := io.ReadFull(rand.Reader, c.prefix[:]); err != nil {
+		return nil, err
+	}
+
+	return c, nil
 }
 
 // Encrypt encrypts plaintext and returns ciphertext with nonce prepended
 func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
-	// Generate random nonce
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
+	// Build nonce from 4-byte random prefix + 8-byte atomic counter
+	// This avoids per-packet syscall to rand.Reader while guaranteeing uniqueness
+	nonce := make([]byte, c.aead.NonceSize()) // 12 bytes for AES-GCM
+	copy(nonce[:4], c.prefix[:])
+	binary.LittleEndian.PutUint64(nonce[4:], atomic.AddUint64(&c.counter, 1))
 
 	// Encrypt and prepend nonce
 	ciphertext := c.aead.Seal(nonce, nonce, plaintext, nil)
