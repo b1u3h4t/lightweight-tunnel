@@ -1,4 +1,4 @@
-.PHONY: all build clean install help install-service
+.PHONY: all build clean install help install-service docker-test
 
 # Binary name
 BINARY_NAME=lightweight-tunnel
@@ -30,6 +30,11 @@ build:
 	@mkdir -p $(OUTPUT_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(GOBIN)/$(BINARY_NAME) ./cmd/$(BINARY_NAME)
 	@echo "Build complete: $(GOBIN)/$(BINARY_NAME)"
+
+## docker-test: Run docker compose tunnel regression tests
+docker-test:
+	docker compose down -v
+	docker compose up --build --abort-on-container-exit --exit-code-from tester
 
 ## clean: Clean build artifacts
 clean:
