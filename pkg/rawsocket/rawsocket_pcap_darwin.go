@@ -51,15 +51,38 @@ func darwinTCPFlagsString(tcp *layers.TCP) string {
 }
 
 func initializeDarwinPcap(rs *RawSocket) {
-	device := selectDarwinPcapDevice()
+	device := selectDarwinPcapDevice(rs.localIP, rs.remoteIP, rs.remotePort)
 	if device == "" {
 		log.Printf("⚠️  Failed to find a usable macOS pcap device (raw socket will be used)")
 		return
 	}
 
-	handle, err := pcap.OpenLive(device, 65535, true, pcap.BlockForever)
+	inactive, err := pcap.NewInactiveHandle(device)
 	if err != nil {
-		log.Printf("⚠️  Failed to open pcap handle: %v (raw socket will be used)", err)
+		log.Printf("⚠️  Failed to create pcap handle for %s: %v (raw socket will be used)", device, err)
+		return
+	}
+	defer inactive.CleanUp()
+
+	if err := inactive.SetSnapLen(65535); err != nil {
+		log.Printf("⚠️  Failed to set pcap snaplen on %s: %v (raw socket will be used)", device, err)
+		return
+	}
+	if err := inactive.SetPromisc(true); err != nil {
+		log.Printf("⚠️  Failed to set pcap promisc on %s: %v (raw socket will be used)", device, err)
+		return
+	}
+	if err := inactive.SetImmediateMode(true); err != nil {
+		log.Printf("⚠️  Failed to enable pcap immediate mode on %s: %v (continuing)", device, err)
+	}
+	if err := inactive.SetTimeout(200 * time.Millisecond); err != nil {
+		log.Printf("⚠️  Failed to set pcap timeout on %s: %v (raw socket will be used)", device, err)
+		return
+	}
+
+	handle, err := inactive.Activate()
+	if err != nil {
+		log.Printf("⚠️  Failed to activate pcap handle on %s: %v (raw socket will be used)", device, err)
 		return
 	}
 
@@ -78,15 +101,34 @@ func initializeDarwinPcap(rs *RawSocket) {
 
 	rs.pcapHandle = handle
 	go rs.pcapReceiverDarwin(handle)
-	log.Printf("✅ pcap receiver started on %s with filter: %s", device, filter)
+	log.Printf("✅ pcap receiver started on %s with filter: %s (local=%s remote=%s:%d)", device, filter, rs.localIP, rs.remoteIP, rs.remotePort)
 }
 
 func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	for packet := range packetSource.Packets() {
+	var packetCount uint64
+	var decodeFailures uint64
+	for {
+		packetData, _, err := handle.ReadPacketData()
+		if err != nil {
+			if err == pcap.NextErrorTimeoutExpired {
+				continue
+			}
+			if err == pcap.NextErrorNotActivated || err == pcap.NextErrorNoMorePackets {
+				return
+			}
+			log.Printf("⚠️  Darwin pcap read error on %s:%d -> %s:%d: %v", rs.localIP, rs.localPort, rs.remoteIP, rs.remotePort, err)
+			continue
+		}
+
+		packet := gopacket.NewPacket(packetData, handle.LinkType(), gopacket.NoCopy)
 		ipLayer := packet.Layer(layers.LayerTypeIPv4)
 		tcpLayer := packet.Layer(layers.LayerTypeTCP)
 		if ipLayer == nil || tcpLayer == nil {
+			decodeFailures++
+			if decodeFailures <= 5 || decodeFailures%100 == 0 {
+				log.Printf("📉 Darwin pcap decode miss count=%d local=%s:%d remote=%s:%d linkType=%s packetLen=%d",
+					decodeFailures, rs.localIP, rs.localPort, rs.remoteIP, rs.remotePort, handle.LinkType(), len(packetData))
+			}
 			continue
 		}
 
@@ -132,6 +174,11 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 		packetData = append(packetData, ip.Contents...)
 		packetData = append(packetData, tcp.Contents...)
 		packetData = append(packetData, tcp.Payload...)
+		packetCount++
+		if packetCount <= 5 || packetCount%500 == 0 {
+			log.Printf("📦 Darwin pcap accepted count=%d local=%s:%d remote=%s:%d flags=%s payload=%d",
+				packetCount, rs.localIP, rs.localPort, rs.remoteIP, rs.remotePort, darwinTCPFlagsString(tcp), len(tcp.Payload))
+		}
 
 		select {
 		case rs.pcapPacket <- packetData:

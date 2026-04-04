@@ -53,7 +53,61 @@ func shouldUseDarwinPcapInterface(name string, flags net.Flags, addrs []net.Addr
 	return false
 }
 
-func selectDarwinPcapDevice() string {
+func findDarwinPcapDeviceByIP(target net.IP) string {
+	if target == nil || target.To4() == nil {
+		return ""
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		if !shouldUseDarwinPcapInterface(iface.Name, iface.Flags, addrs) {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || ipNet.IP == nil || ipNet.IP.To4() == nil {
+				continue
+			}
+			if ipNet.IP.Equal(target) {
+				return iface.Name
+			}
+		}
+	}
+
+	return ""
+}
+
+func selectDarwinPcapDevice(localIP, remoteIP net.IP, remotePort uint16) string {
+	if device := findDarwinPcapDeviceByIP(localIP); device != "" {
+		return device
+	}
+
+	if remoteIP != nil && remoteIP.To4() != nil {
+		port := int(remotePort)
+		if port == 0 {
+			port = 53
+		}
+
+		conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: remoteIP, Port: port})
+		if err == nil {
+			localAddr := conn.LocalAddr()
+			_ = conn.Close()
+			if udpAddr, ok := localAddr.(*net.UDPAddr); ok {
+				if device := findDarwinPcapDeviceByIP(udpAddr.IP); device != "" {
+					return device
+				}
+			}
+		}
+	}
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return ""
