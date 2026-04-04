@@ -170,7 +170,7 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 			continue
 		}
 
-		packetData := make([]byte, 0, len(ip.Contents)+len(tcp.Contents)+len(tcp.Payload))
+		packetData = make([]byte, 0, len(ip.Contents)+len(tcp.Contents)+len(tcp.Payload))
 		packetData = append(packetData, ip.Contents...)
 		packetData = append(packetData, tcp.Contents...)
 		packetData = append(packetData, tcp.Payload...)
