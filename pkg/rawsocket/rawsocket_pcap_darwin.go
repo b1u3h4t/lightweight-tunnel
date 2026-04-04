@@ -78,8 +78,19 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 		}
 
 		if !matches {
+			filtered := atomic.AddUint64(&rs.pcapFilterDropCount, 1)
 			if !rs.isServer && rs.remotePort != 0 && uint16(tcp.DstPort) == rs.localPort && tcp.SYN && tcp.ACK {
 				log.Printf("🔍 pcapReceiver: Filtered SYN-ACK from %s:%d to %s:%d (expected from %s:%d)", ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort, rs.remoteIP, rs.remotePort)
+			} else if filtered <= 5 || filtered%100 == 0 {
+				log.Printf("📉 pcap filter drop count=%d local=%s:%d remote=%s:%d saw=%s:%d -> %s:%d flags=%s payload=%d",
+					filtered,
+					rs.localIP, rs.localPort,
+					rs.remoteIP, rs.remotePort,
+					ip.SrcIP, tcp.SrcPort,
+					ip.DstIP, tcp.DstPort,
+					tcp.Flags,
+					len(tcp.Payload),
+				)
 			}
 			continue
 		}
@@ -92,7 +103,16 @@ func (rs *RawSocket) pcapReceiverDarwin(handle *pcap.Handle) {
 		select {
 		case rs.pcapPacket <- packetData:
 		default:
-			atomic.AddUint64(&rs.pcapDropCount, 1)
+			drops := atomic.AddUint64(&rs.pcapDropCount, 1)
+			if drops <= 5 || drops%100 == 0 {
+				log.Printf("📉 pcap channel drop count=%d local=%s:%d remote=%s:%d payload=%d flags=%s",
+					drops,
+					rs.localIP, rs.localPort,
+					rs.remoteIP, rs.remotePort,
+					len(tcp.Payload),
+					tcp.Flags,
+				)
+			}
 		}
 	}
 }

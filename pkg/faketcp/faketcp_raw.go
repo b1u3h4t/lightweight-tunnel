@@ -252,14 +252,29 @@ func (c *ConnRaw) recvLoop() {
 		if c.isConnected {
 			// Client mode: accept packets from server
 			if !srcIP.Equal(c.remoteIP) || srcPort != c.remotePort {
+				drops := atomic.AddUint64(&c.RecvDrops, 1)
+				if drops <= 5 || drops%100 == 0 {
+					log.Printf("📉 recvLoop source mismatch count=%d expected=%s:%d got=%s:%d flags=%02x payload=%d",
+						drops, c.remoteIP, c.remotePort, srcIP, srcPort, flags, len(payload))
+				}
 				continue
 			}
 			if !dstIP.Equal(c.localIP) || dstPort != c.localPort {
+				drops := atomic.AddUint64(&c.RecvDrops, 1)
+				if drops <= 5 || drops%100 == 0 {
+					log.Printf("📉 recvLoop destination mismatch count=%d expected=%s:%d got=%s:%d flags=%02x payload=%d",
+						drops, c.localIP, c.localPort, dstIP, dstPort, flags, len(payload))
+				}
 				continue
 			}
 		} else {
 			// Server mode: accept packets from any client (will be handled by listener)
 			if !dstIP.Equal(c.localIP) || dstPort != c.localPort {
+				drops := atomic.AddUint64(&c.RecvDrops, 1)
+				if drops <= 5 || drops%100 == 0 {
+					log.Printf("📉 recvLoop listener destination mismatch count=%d expected=%s:%d got=%s:%d flags=%02x payload=%d",
+						drops, c.localIP, c.localPort, dstIP, dstPort, flags, len(payload))
+				}
 				continue
 			}
 		}
@@ -283,6 +298,11 @@ func (c *ConnRaw) recvLoop() {
 		// 只在已连接状态下过滤payload=0的包
 		// 握手期间（!isConnected）需要处理SYN-ACK等控制包
 		if c.isConnected && len(payload) == 0 {
+			drops := atomic.AddUint64(&c.RecvDrops, 1)
+			if drops <= 5 || drops%100 == 0 {
+				log.Printf("📉 recvLoop ignored empty-payload packet count=%d remote=%s:%d flags=%02x seq=%d ack=%d",
+					drops, srcIP, srcPort, flags, seq, ack)
+			}
 			continue
 		}
 
@@ -309,7 +329,11 @@ func (c *ConnRaw) recvLoop() {
 			case c.recvQueue <- fullData:
 			default:
 				// Queue full, drop packet
-				atomic.AddUint64(&c.RecvDrops, 1)
+				drops := atomic.AddUint64(&c.RecvDrops, 1)
+				if drops <= 5 || drops%100 == 0 {
+					log.Printf("📉 recvLoop queue-full drop count=%d local=%s:%d remote=%s:%d payload=%d flags=%02x",
+						drops, c.localIP, c.localPort, c.remoteIP, c.remotePort, len(payload), flags)
+				}
 			}
 		}
 	}
@@ -826,7 +850,17 @@ func (l *ListenerRaw) acceptLoop() {
 				case conn.recvQueue <- fullData:
 				default:
 					// 队列满，丢弃
-					atomic.AddUint64(&l.RecvDrops, 1)
+					drops := atomic.AddUint64(&l.RecvDrops, 1)
+					if drops <= 5 || drops%100 == 0 {
+						log.Printf("📉 listener recvQueue drop count=%d conn=%s payload=%d flags=%02x",
+							drops, connKey, len(payload), flags)
+					}
+				}
+			} else {
+				drops := atomic.AddUint64(&l.RecvDrops, 1)
+				if drops <= 5 || drops%100 == 0 {
+					log.Printf("📉 listener ignored empty-payload packet count=%d conn=%s flags=%02x seq=%d ack=%d",
+						drops, connKey, flags, seq, ack)
 				}
 			}
 			// FIN/RST包不需要放入queue，连接关闭会由其他机制处理

@@ -100,8 +100,11 @@ type RawSocket struct {
 	pcapPacket chan []byte
 
 	// Drop counter for observability
-	pcapDropCount uint64
-	recvDropCount uint64
+	pcapDropCount        uint64
+	recvDropCount        uint64
+	pcapFilterDropCount  uint64
+	darwinFallbackCount  uint64
+	darwinFallbackEAGAIN uint64
 }
 
 // NewRawSocket creates a new raw socket
@@ -430,6 +433,7 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 	if err != nil {
 		// On macOS, EAGAIN/EWOULDBLOCK is common - kernel processed the packet
 		if runtime.GOOS == "darwin" {
+			rs.noteDarwinFallback(err)
 			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 				// This is expected on macOS - kernel processed the packet
 				// Return a timeout-like error that can be handled by the caller
@@ -509,6 +513,27 @@ func (rs *RawSocket) Close() error {
 		err = closeErr
 	}
 	return err
+}
+
+func (rs *RawSocket) noteDarwinFallback(err error) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+
+	total := atomic.AddUint64(&rs.darwinFallbackCount, 1)
+	if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+		eagain := atomic.AddUint64(&rs.darwinFallbackEAGAIN, 1)
+		if eagain <= 5 || eagain%100 == 0 {
+			log.Printf("📉 Darwin raw fallback EAGAIN count=%d totalFallback=%d local=%s:%d remote=%s:%d",
+				eagain, total, rs.localIP, rs.localPort, rs.remoteIP, rs.remotePort)
+		}
+		return
+	}
+
+	if total <= 5 || total%100 == 0 {
+		log.Printf("📉 Darwin raw fallback error count=%d local=%s:%d remote=%s:%d err=%v",
+			total, rs.localIP, rs.localPort, rs.remoteIP, rs.remotePort, err)
+	}
 }
 
 // GetLocalAddr returns local address
