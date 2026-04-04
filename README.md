@@ -134,6 +134,8 @@ sudo cp lightweight-tunnel /usr/local/bin/
 ./lightweight-tunnel -v
 ```
 
+Raw TCP 在 macOS 上要求 **原生 Darwin 构建 + CGO + libpcap**。如果你在 Linux 上用 `GOOS=darwin CGO_ENABLED=0` 交叉编译，二进制现在可以成功生成，但它只用于编译产物验证，不支持实际 rawtcp 握手。
+
 **Apple Silicon (M1/M2/M3)**:
 
 ```bash
@@ -861,14 +863,14 @@ sudo codesign --entitlements entitlements.plist --force --sign - ./lightweight-t
 
 macOS 对 Raw Socket 有更严格的限制：
 
-- ⚠️ 内核可能处理部分 TCP 包，导致接收失败
-- ⚠️ 可能需要使用 libpcap 作为备选接收方式
-- ✅ 已自动实现 libpcap 回退机制
+- ⚠️ 内核可能直接处理 TCP 包，raw socket 接收路径并不可靠
+- ✅ 当前可用方案依赖 libpcap 抓取握手包
+- ⚠️ 没有 `cgo + libpcap` 的 Darwin 二进制不支持 rawtcp 运行
 
 **工作原理**:
-1. 首先尝试使用 Raw Socket 接收
-2. 如果失败（内核处理了包），自动切换到 libpcap
-3. libpcap 直接从网卡捕获原始数据包
+1. 发送仍然走 raw socket
+2. macOS 上握手包接收依赖 libpcap 从物理网卡抓包
+3. 如果 Darwin 二进制没有编进 libpcap 支持，程序会直接返回明确错误，而不是继续等待握手超时
 
 #### Q13: macOS 防火墙配置
 
@@ -1106,6 +1108,14 @@ macOS 版本需要 CGO，因为：
 # 需要 osxcross 工具链
 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=o64-clang go build ./cmd/lightweight-tunnel
 ```
+
+如果只是确认仓库当前代码能生成 Darwin 产物，也可以在 Linux 上执行：
+
+```bash
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o bin/lightweight-tunnel-darwin-arm64 ./cmd/lightweight-tunnel
+```
+
+但这类 `CGO_ENABLED=0` Darwin 二进制 **不能用于 macOS rawtcp 实际连接**。
 
 #### 贡献指南
 

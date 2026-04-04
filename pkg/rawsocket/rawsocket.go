@@ -6,16 +6,71 @@ import (
 	"log"
 	"net"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 	"unsafe"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 )
+
+func darwinRawTCPUnsupportedError() error {
+	return fmt.Errorf("macOS rawtcp requires a darwin build with cgo + libpcap; CGO_ENABLED=0 darwin binaries are compile-only and cannot receive handshake packets")
+}
+
+func shouldRequireDarwinPcap(goos string, backendAvailable bool) bool {
+	return goos == "darwin" && !backendAvailable
+}
+
+func shouldUseDarwinPcapInterface(name string, flags net.Flags, addrs []net.Addr) bool {
+	if flags&net.FlagUp == 0 || flags&net.FlagLoopback != 0 {
+		return false
+	}
+	if len(name) >= 4 && name[:4] == "utun" {
+		return false
+	}
+	if len(name) >= 4 && name[:4] == "awdl" {
+		return false
+	}
+	if len(name) >= 3 && name[:3] == "llw" {
+		return false
+	}
+	if len(name) >= 6 && name[:6] == "bridge" {
+		return false
+	}
+	if len(name) >= 6 && name[:6] == "docker" {
+		return false
+	}
+	if len(name) >= 3 && (name[:3] == "gif" || name[:3] == "stf") {
+		return false
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP == nil {
+			continue
+		}
+		if ipNet.IP.To4() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func selectDarwinPcapDevice() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		if shouldUseDarwinPcapInterface(iface.Name, iface.Flags, addrs) {
+			return iface.Name
+		}
+	}
+
+	return ""
+}
 
 const (
 	// Protocol numbers
@@ -41,9 +96,7 @@ type RawSocket struct {
 	remotePort uint16
 	isServer   bool
 
-	// macOS-specific: use libpcap for receiving
-	pcapHandle *pcap.Handle
-	pcapMu     sync.Mutex
+	pcapHandle any
 	pcapPacket chan []byte
 
 	// Drop counter for observability
@@ -53,6 +106,10 @@ type RawSocket struct {
 
 // NewRawSocket creates a new raw socket
 func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort uint16, isServer bool) (*RawSocket, error) {
+	if shouldRequireDarwinPcap(runtime.GOOS, darwinPcapBackendAvailable()) {
+		return nil, darwinRawTCPUnsupportedError()
+	}
+
 	// Create raw socket for receiving (IPPROTO_TCP)
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
 	if err != nil {
@@ -161,114 +218,11 @@ func NewRawSocket(localIP net.IP, localPort uint16, remoteIP net.IP, remotePort 
 		pcapPacket: make(chan []byte, 4096),
 	}
 
-	// On macOS, try to use libpcap for receiving packets
-	// This can bypass the raw socket limitation
 	if runtime.GOOS == "darwin" {
-		// Try to open pcap handle
-		handle, err := pcap.OpenLive("any", 65535, true, pcap.BlockForever)
-		if err == nil {
-			// Set filter to capture TCP packets
-			// For client: capture packets from server (src port = remotePort) to us (dst port = localPort)
-			// For server: capture packets to our port (dst port = localPort)
-			var filter string
-			if !isServer && remotePort != 0 {
-				// Client mode: capture packets from server port to our local port
-				filter = fmt.Sprintf("tcp and (dst port %d or src port %d)", localPort, remotePort)
-			} else {
-				// Server mode: capture packets to our port
-				filter = fmt.Sprintf("tcp port %d", localPort)
-			}
-
-			if err := handle.SetBPFFilter(filter); err == nil {
-				rs.pcapHandle = handle
-				// Start pcap receiver in background
-				go rs.pcapReceiver()
-				log.Printf("✅ pcap receiver started with filter: %s", filter)
-			} else {
-				log.Printf("⚠️  Failed to set pcap filter '%s': %v", filter, err)
-				handle.Close()
-			}
-		} else {
-			log.Printf("⚠️  Failed to open pcap handle: %v (raw socket will be used)", err)
-		}
+		initializeDarwinPcap(rs)
 	}
 
 	return rs, nil
-}
-
-// pcapReceiver receives packets using libpcap (macOS workaround)
-func (rs *RawSocket) pcapReceiver() {
-	if rs.pcapHandle == nil {
-		return
-	}
-
-	packetSource := gopacket.NewPacketSource(rs.pcapHandle, rs.pcapHandle.LinkType())
-	for packet := range packetSource.Packets() {
-		// Extract IP and TCP layers
-		ipLayer := packet.Layer(layers.LayerTypeIPv4)
-		tcpLayer := packet.Layer(layers.LayerTypeTCP)
-
-		if ipLayer != nil && tcpLayer != nil {
-			ip, _ := ipLayer.(*layers.IPv4)
-			tcp, _ := tcpLayer.(*layers.TCP)
-
-			// Filter for our connection
-			// For server: accept packets to our port
-			// For client: accept packets from server to our local port
-			// During handshake/reconnection, we may not have remoteIP set yet, so be more lenient
-			matches := false
-			if rs.isServer {
-				matches = uint16(tcp.DstPort) == rs.localPort
-			} else {
-				// Client mode: check if packet is from server to us
-				// Check: packet to our local port AND (from remote IP/port OR from any IP with remote port)
-				if uint16(tcp.DstPort) == rs.localPort {
-					if rs.remoteIP != nil && rs.remotePort != 0 {
-						// Strict match: from server IP and port
-						matches = ip.SrcIP.Equal(rs.remoteIP) && uint16(tcp.SrcPort) == rs.remotePort
-					} else if rs.remotePort != 0 {
-						// During handshake: accept any packet to our local port from server port
-						// This allows us to receive SYN-ACK during handshake even if remoteIP not set yet
-						matches = uint16(tcp.SrcPort) == rs.remotePort
-					} else {
-						// If remotePort is 0, accept any packet to our local port (shouldn't happen in normal operation)
-						matches = true
-					}
-				} else if rs.remotePort != 0 && uint16(tcp.SrcPort) == rs.remotePort {
-					// Also accept packets from server port (in case destination port changed)
-					matches = ip.SrcIP.Equal(rs.remoteIP) || rs.remoteIP == nil
-				}
-			}
-
-			if matches {
-				// Build packet data (IP header + TCP header + payload)
-				packetData := make([]byte, 0, len(ip.Contents)+len(tcp.Contents)+len(tcp.Payload))
-				packetData = append(packetData, ip.Contents...)
-				packetData = append(packetData, tcp.Contents...)
-				packetData = append(packetData, tcp.Payload...)
-
-				// Send to channel (non-blocking)
-				select {
-				case rs.pcapPacket <- packetData:
-					// Successfully queued
-				default:
-					// Channel full, drop packet
-					atomic.AddUint64(&rs.pcapDropCount, 1)
-				}
-			} else {
-				// Debug: log filtered packets during handshake (first few only)
-				// This helps diagnose why SYN-ACK might not be received
-				if !rs.isServer && rs.remotePort != 0 && uint16(tcp.DstPort) == rs.localPort {
-					// This is a packet to our port but filtered - log for debugging
-					// Only log SYN-ACK packets to reduce noise
-					if tcp.SYN && tcp.ACK {
-						log.Printf("🔍 pcapReceiver: Filtered SYN-ACK from %s:%d to %s:%d (expected from %s:%d)",
-							ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort, rs.remoteIP, rs.remotePort)
-					}
-				}
-			}
-		}
-	}
 }
 
 // BuildIPHeader constructs an IPv4 header
@@ -460,60 +414,14 @@ func (rs *RawSocket) SendPacket(srcIP net.IP, srcPort uint16, dstIP net.IP, dstP
 // RecvPacket receives a raw IP packet and extracts TCP header and payload
 func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16,
 	seq, ack uint32, flags uint8, payload []byte, err error) {
+	if shouldRequireDarwinPcap(runtime.GOOS, darwinPcapBackendAvailable()) {
+		return nil, 0, nil, 0, 0, 0, 0, nil, darwinRawTCPUnsupportedError()
+	}
 
-	// On macOS, try to use libpcap first (if available)
-	if runtime.GOOS == "darwin" && rs.pcapHandle != nil {
-		select {
-		case packetData := <-rs.pcapPacket:
-			// Parse packet from pcap
-			if len(packetData) < IPHeaderSize+TCPHeaderSize {
-				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet too small: %d bytes", len(packetData))
-			}
-
-			// Copy to buf if it fits
-			if len(packetData) <= len(buf) {
-				copy(buf, packetData)
-			}
-
-			// Parse IP header
-			ipHeader := packetData[:IPHeaderSize]
-			ihl := (ipHeader[0] & 0x0F) * 4
-			if int(ihl) > len(packetData) {
-				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("invalid IP header length")
-			}
-
-			protocol := ipHeader[9]
-			if protocol != IPPROTO_TCP {
-				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("not a TCP packet")
-			}
-
-			srcIP = net.IPv4(ipHeader[12], ipHeader[13], ipHeader[14], ipHeader[15])
-			dstIP = net.IPv4(ipHeader[16], ipHeader[17], ipHeader[18], ipHeader[19])
-
-			// Parse TCP header
-			tcpStart := int(ihl)
-			if len(packetData) < tcpStart+TCPHeaderSize {
-				return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet too small for TCP header")
-			}
-
-			tcpHeader := packetData[tcpStart : tcpStart+TCPHeaderSize]
-			srcPort = binary.BigEndian.Uint16(tcpHeader[0:2])
-			dstPort = binary.BigEndian.Uint16(tcpHeader[2:4])
-			seq = binary.BigEndian.Uint32(tcpHeader[4:8])
-			ack = binary.BigEndian.Uint32(tcpHeader[8:12])
-			dataOffset := (tcpHeader[12] >> 4) * 4
-			flags = tcpHeader[13]
-
-			// Extract payload
-			payloadStart := tcpStart + int(dataOffset)
-			if payloadStart < len(packetData) {
-				payload = make([]byte, len(packetData)-payloadStart)
-				copy(payload, packetData[payloadStart:])
-			}
-
-			return srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, nil
-		case <-time.After(100 * time.Millisecond):
-			// Timeout - fall through to raw socket
+	if runtime.GOOS == "darwin" {
+		srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, handled, err := recvPacketDarwinPcap(rs, buf)
+		if handled {
+			return srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, err
 		}
 	}
 
@@ -592,11 +500,7 @@ func (rs *RawSocket) SetWriteTimeout(sec, usec int64) error {
 func (rs *RawSocket) Close() error {
 	var err error
 
-	// Close pcap handle if used
-	if rs.pcapHandle != nil {
-		rs.pcapHandle.Close()
-		rs.pcapHandle = nil
-	}
+	closeDarwinPcap(rs)
 
 	if rs.sendFd != rs.fd {
 		err = syscall.Close(rs.sendFd)

@@ -300,5 +300,6 @@ sudo journalctl -u lightweight-tunnel-server -f
 
 ## 更多信息
 
+- macOS rawtcp 运行需要原生 Darwin 构建并启用 `cgo + libpcap`。Linux 上 `GOOS=darwin CGO_ENABLED=0` 交叉编译出来的 Darwin 二进制仅用于编译验证，不能实际完成握手。
 - 主文档：[../README.md](../README.md)
 - 配置说明：[README.md](README.md)
