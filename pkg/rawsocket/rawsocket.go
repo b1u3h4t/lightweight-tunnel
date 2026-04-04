@@ -465,6 +465,9 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 		if handled {
 			return srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, err
 		}
+		if rs.pcapHandle != nil {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("pcap timeout")
+		}
 	}
 
 	// Fall back to raw socket (or use it on Linux)
