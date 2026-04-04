@@ -1,0 +1,18 @@
+{
+  "mode": "client",
+  "remote_addr": "server:9000",
+  "tunnel_addr": "10.99.0.2/24",
+  "key": "docker-test-key-2025",
+  "mtu": 1200,
+  "fec_data": 5,
+  "fec_parity": 2,
+  "send_queue_size": 2000,
+  "recv_queue_size": 2000,
+  "timeout": 30,
+  "keepalive": 5,
+  "p2p_enabled": false,
+  "enable_mesh_routing": false,
+  "enable_nat_detection": false,
+  "enable_xdp": false,
+  "enable_kernel_tune": false
+}

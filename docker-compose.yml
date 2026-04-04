@@ -1,0 +1,70 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lt-server
+    privileged: true
+    volumes:
+      - ./docker-test/server.json:/etc/lightweight-tunnel/config.json:ro
+    command: ["-c", "/etc/lightweight-tunnel/config.json"]
+    networks:
+      tunnel-net:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "tun0"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  client1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lt-client1
+    privileged: true
+    volumes:
+      - ./docker-test/client.json:/etc/lightweight-tunnel/config.json:ro
+    command: ["-c", "/etc/lightweight-tunnel/config.json"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      tunnel-net:
+        ipv4_address: 172.30.0.20
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "tun0"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  client2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lt-client2
+    privileged: true
+    volumes:
+      - ./docker-test/client2.json:/etc/lightweight-tunnel/config.json:ro
+    command: ["-c", "/etc/lightweight-tunnel/config.json"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      tunnel-net:
+        ipv4_address: 172.30.0.21
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "tun0"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+networks:
+  tunnel-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
