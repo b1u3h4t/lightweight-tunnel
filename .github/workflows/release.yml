@@ -30,44 +30,30 @@ jobs:
 
   build-linux:
     needs: test
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - goarch: amd64
+          - runner: ubuntu-latest
             suffix: linux-amd64
-            cc: gcc
-            pkg: ""
-          - goarch: arm64
+          - runner: ubuntu-24.04-arm
             suffix: linux-arm64
-            cc: aarch64-linux-gnu-gcc
-            pkg: "gcc-aarch64-linux-gnu libpcap-dev:arm64"
 
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
 
-      - name: Install cross-compile deps
-        run: |
-          if [ "${{ matrix.goarch }}" = "arm64" ]; then
-            sudo dpkg --add-architecture arm64
-            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          fi
-          sudo apt-get update
-          sudo apt-get install -y libpcap-dev ${{ matrix.pkg }}
-
-      - name: Build
+      - name: Build and package
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
-          CC: ${{ matrix.cc }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           OUTPUT="lightweight-tunnel-${{ matrix.suffix }}"
@@ -88,6 +74,7 @@ jobs:
     needs: test
     runs-on: macos-14
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goarch: amd64

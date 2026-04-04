@@ -151,7 +151,11 @@ func (m *MTUDiscovery) testMTU(targetIP string, mtu int) bool {
 			setsockoptErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, IP_DONTFRAG, 1)
 		} else {
 			// Linux: IP_MTU_DISCOVER = 10, IP_PMTUDISC_DO = 2 (force DF)
-			setsockoptErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_MTU_DISCOVER, syscall.IP_PMTUDISC_DO)
+			const (
+				IP_MTU_DISCOVER = 10
+				IP_PMTUDISC_DO  = 2
+			)
+			setsockoptErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
 		}
 	})
 	if setsockoptErr != nil {
