@@ -33,5 +33,6 @@ Thumbs.db
 # Config files (keep templates, ignore actual configs)
 config.json
 config.json.client
+config-client.json
 *.config.json
 /etc/lightweight-tunnel/
