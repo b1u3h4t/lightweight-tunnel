@@ -58,6 +58,7 @@ const (
 
 	// Queue management constants
 	QueueSendTimeout = 10 * time.Millisecond // Timeout for queue send operations; keep short to avoid blocking TUN reads
+	SmallPacketFECBypassThreshold = 256       // Tiny packets (e.g. ACK/ICMP) are cheaper to resend than to amplify into many FEC shards
 
 	// Connection health constants
 	// IdleConnectionTimeout is the maximum time without receiving packets before considering connection dead.
@@ -97,6 +98,14 @@ func enqueueWithTimeout(queue chan []byte, packet []byte, stopCh <-chan struct{}
 	case <-timer.C:
 		return false
 	}
+}
+
+func shouldBypassFEC(packet []byte) bool {
+	if len(packet) <= SmallPacketFECBypassThreshold {
+		return true
+	}
+
+	return len(packet) >= IPv4MinHeaderLen && packet[0]>>4 == IPv4Version && packet[9] == 6
 }
 
 // ClientConnection represents a single client connection
@@ -1408,6 +1417,14 @@ func (t *Tunnel) tunReader() {
 		packet := packetBuf[:n]
 		copy(packet, buf[packetStart:packetStart+n])
 
+		// Filter non-unicast traffic from host stack noise (mDNS/LLMNR/IGMP, etc.).
+		// These packets are not tunnel peer traffic and should not be sent upstream.
+		dstIP := net.IP(packet[IPv4DstIPOffset : IPv4DstIPOffset+4])
+		if dstIP.IsMulticast() || dstIP.IsLoopback() || dstIP.Equal(net.IPv4bcast) {
+			t.releasePacketBuffer(packetBuf)
+			continue
+		}
+
 		// Use intelligent routing if P2P is enabled
 		if t.config.P2PEnabled && t.routingTable != nil {
 			queued, err := t.sendPacketWithRouting(packet)
@@ -2059,6 +2076,8 @@ func (t *Tunnel) netWriter() {
 			func() {
 				defer t.releasePacketBuffer(packet)
 
+				bypassFEC := shouldBypassFEC(packet)
+
 				fullPacket, _ := prependPacketType(packet, PacketTypeData)
 
 				// Encrypt if cipher is available
@@ -2080,7 +2099,7 @@ func (t *Tunnel) netWriter() {
 
 				// Send with FEC if enabled
 				var sendErr error
-				if t.fecEnabled {
+				if t.fecEnabled && !bypassFEC {
 					sendErr = t.sendPacketWithFEC(t.conn, encryptedPacket)
 				} else {
 					sendErr = t.conn.WritePacket(encryptedPacket)
@@ -2117,7 +2136,7 @@ func (t *Tunnel) netWriter() {
 
 					if t.conn != nil {
 						var retryErr error
-						if t.fecEnabled {
+						if t.fecEnabled && !bypassFEC {
 							retryErr = t.sendPacketWithFEC(t.conn, encryptedPacket)
 						} else {
 							retryErr = t.conn.WritePacket(encryptedPacket)
@@ -2565,6 +2584,7 @@ func (t *Tunnel) clientNetWriter(client *ClientConnection) {
 				if len(packet) >= 10 {
 					protocol = packet[9]
 				}
+				bypassFEC := shouldBypassFEC(packet)
 
 				fullPacket, _ := prependPacketType(packet, PacketTypeData)
 
@@ -2577,7 +2597,7 @@ func (t *Tunnel) clientNetWriter(client *ClientConnection) {
 
 				// Send with FEC if enabled
 				var sendErr error
-				if t.fecEnabled {
+				if t.fecEnabled && !bypassFEC {
 					sendErr = t.sendPacketWithFEC(client.conn, encryptedPacket)
 				} else {
 					sendErr = client.conn.WritePacket(encryptedPacket)
@@ -4475,6 +4495,10 @@ func (t *Tunnel) sendPeerInfoAndPunch(client *ClientConnection, peerInfo string)
 func (t *Tunnel) sendPacketWithFEC(conn faketcp.ConnAdapter, packet []byte) error {
 	if !t.fecEnabled || t.fec == nil {
 		// FEC not enabled, send packet directly
+		return conn.WritePacket(packet)
+	}
+
+	if len(packet) <= SmallPacketFECBypassThreshold {
 		return conn.WritePacket(packet)
 	}
 

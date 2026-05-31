@@ -527,6 +527,29 @@ func (rs *RawSocket) RecvPacket(buf []byte) (srcIP net.IP, srcPort uint16, dstIP
 		copy(payload, buf[payloadStart:n])
 	}
 
+	// Fast tuple filter: keep unrelated TCP traffic from entering faketcp recv loops.
+	if rs.isServer {
+		if rs.localPort != 0 && dstPort != rs.localPort {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: dst port mismatch")
+		}
+		if rs.localIP != nil && !rs.localIP.Equal(net.IPv4zero) && !dstIP.Equal(rs.localIP) {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: dst ip mismatch")
+		}
+	} else {
+		if rs.remoteIP != nil && !srcIP.Equal(rs.remoteIP) {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: src ip mismatch")
+		}
+		if rs.remotePort != 0 && srcPort != rs.remotePort {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: src port mismatch")
+		}
+		if rs.localPort != 0 && dstPort != rs.localPort {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: dst port mismatch")
+		}
+		if rs.localIP != nil && !rs.localIP.Equal(net.IPv4zero) && !dstIP.Equal(rs.localIP) {
+			return nil, 0, nil, 0, 0, 0, 0, nil, fmt.Errorf("packet filtered: dst ip mismatch")
+		}
+	}
+
 	return srcIP, srcPort, dstIP, dstPort, seq, ack, flags, payload, nil
 }
 
