@@ -302,7 +302,8 @@ func (c *ConnRaw) recvLoop() {
 		}
 
 		// Update ack number and immediately acknowledge payload to keep TCP disguise realistic
-		if len(payload) > 0 {
+		// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
+		if len(payload) > 0 || flags == ACK {
 			c.mu.Lock()
 			c.ackNum = seq + uint32(len(payload))
 			ackToSend := c.ackNum
@@ -774,7 +775,8 @@ func (l *ListenerRaw) acceptLoop() {
 			}(conn)
 
 			// 如果ACK带了数据，也要处理
-			if len(payload) > 0 {
+			// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
+		if len(payload) > 0 || flags == ACK {
 				tcpHdr := &TCPHeader{
 					SrcPort:    srcPort,
 					DstPort:    dstPort,
@@ -789,9 +791,11 @@ func (l *ListenerRaw) acceptLoop() {
 				copy(fullData, headerBytes)
 				copy(fullData[len(headerBytes):], payload)
 
-				select {
-				case conn.recvQueue <- fullData:
-				default:
+				if atomic.LoadInt32(&conn.closed) == 0 {
+					select {
+					case conn.recvQueue <- fullData:
+					default:
+					}
 				}
 			}
 			continue
@@ -842,7 +846,8 @@ func (l *ListenerRaw) acceptLoop() {
 			}
 
 			// 只处理有实际数据的包，忽略纯ACK、keepalive等控制包
-			if len(payload) > 0 {
+			// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
+			if len(payload) > 0 || flags == ACK {
 				conn.mu.Lock()
 				conn.ackNum = seq + uint32(len(payload))
 				conn.lastActivity = time.Now()
@@ -871,14 +876,17 @@ func (l *ListenerRaw) acceptLoop() {
 				copy(fullData, headerBytes)
 				copy(fullData[len(headerBytes):], payload)
 
-				select {
-				case conn.recvQueue <- fullData:
-				default:
-					// 队列满，丢弃
-					drops := atomic.AddUint64(&l.RecvDrops, 1)
-					if drops <= 5 || drops%100 == 0 {
-						log.Printf("📉 listener recvQueue drop count=%d conn=%s payload=%d flags=%02x",
-							drops, connKey, len(payload), flags)
+				// Check connection was not closed before sending to recvQueue
+				if atomic.LoadInt32(&conn.closed) == 0 {
+					select {
+					case conn.recvQueue <- fullData:
+					default:
+						// 队列满，丢弃
+						drops := atomic.AddUint64(&l.RecvDrops, 1)
+						if drops <= 5 || drops%100 == 0 {
+							log.Printf("📉 listener recvQueue drop count=%d conn=%s payload=%d flags=%02x",
+								drops, connKey, len(payload), flags)
+						}
 					}
 				}
 			} else {

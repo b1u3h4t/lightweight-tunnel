@@ -34,5 +34,6 @@ Thumbs.db
 config.json
 config.json.client
 config-client.json
+config-server.json
 *.config.json
 /etc/lightweight-tunnel/
