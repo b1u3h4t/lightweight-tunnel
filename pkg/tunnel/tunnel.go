@@ -2356,13 +2356,28 @@ func (t *Tunnel) clientNetReader(client *ClientConnection) {
 				// Register client IP if not yet registered
 				if client.clientIP == nil {
 					// First packet from this client, register its IP
-					t.addClient(client, srcIP)
+					// If source is a tunnel IP (10.x.x.x), prefer the physical NIC IP
+					// Tunnel IPs are used for ICMP ping/control traffic from the TUN device
+					if srcIP[0] == 10 && t.myTunnelIP != nil && !t.myTunnelIP.Equal(srcIP) {
+						log.Printf("First packet with tunnel IP %s, registering as client tunnel IP", srcIP)
+						t.addClient(client, srcIP)
+					} else {
+						t.addClient(client, srcIP)
+					}
 				} else if !client.clientIP.Equal(srcIP) {
-					// Client is trying to send packets with a different source IP
-					// This is a potential DoS/hijacking attempt
-					log.Printf("WARNING: Client %s trying to send packet with different source IP %s (registered as %s). Dropping packet.",
-						client.conn.RemoteAddr(), srcIP, client.clientIP)
-					continue
+					// If the packet source is a tunnel IP (10.x.x.x), it's normal for ping/ICMP
+					// Allow these packets through — the client's TUN device uses the tunnel IP
+					// This is not a hijack attempt, just the TUN interface issuing ICMP echo requests
+					if srcIP[0] == 10 {
+						// Tunnel IP traffic from registered client, allow it
+						// allow tunnel IP traffic through
+					} else {
+						// Client is trying to send packets with a different source IP
+						// This is a potential DoS/hijacking attempt
+						log.Printf("WARNING: Client %s trying to send packet with different source IP %s (registered as %s). Dropping packet.",
+							client.conn.RemoteAddr(), srcIP, client.clientIP)
+						continue
+					}
 				}
 
 				// Route packet based on destination

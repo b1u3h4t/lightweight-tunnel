@@ -303,7 +303,7 @@ func (c *ConnRaw) recvLoop() {
 
 		// Update ack number and immediately acknowledge payload to keep TCP disguise realistic
 		// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
-		if len(payload) > 0 || flags == ACK {
+		if len(payload) > 0 {
 			c.mu.Lock()
 			c.ackNum = seq + uint32(len(payload))
 			ackToSend := c.ackNum
@@ -776,7 +776,7 @@ func (l *ListenerRaw) acceptLoop() {
 
 			// 如果ACK带了数据，也要处理
 			// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
-		if len(payload) > 0 || flags == ACK {
+		if len(payload) > 0 {
 				tcpHdr := &TCPHeader{
 					SrcPort:    srcPort,
 					DstPort:    dstPort,
@@ -847,7 +847,7 @@ func (l *ListenerRaw) acceptLoop() {
 
 			// 只处理有实际数据的包，忽略纯ACK、keepalive等控制包
 			// 处理所有数据包，包括纯ACK/keepalive，确保上层协议能正常处理 keepalive 和连接维护
-			if len(payload) > 0 || flags == ACK {
+			if len(payload) > 0 {
 				conn.mu.Lock()
 				conn.ackNum = seq + uint32(len(payload))
 				conn.lastActivity = time.Now()
