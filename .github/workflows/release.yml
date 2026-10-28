@@ -1,5 +1,10 @@
 name: Release
 
+# 运行器策略：
+#   - pull_request（可能来自 fork）→ GitHub 托管 runner，绝不落到自托管机器
+#   - push / workflow_dispatch / tag（可信触发）→ nc3 自托管 runner（标签 nc3）
+#   - arm64 / macOS 产物仍用 GitHub 托管原生 runner（nc3 是 x86_64）
+
 on:
   push:
     tags:
@@ -10,11 +15,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: nc3
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libpcap
+      - name: Install libpcap (GitHub-hosted only)
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       - name: Set up Go
@@ -35,15 +41,18 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-latest
+            runner_self: nc3
             suffix: linux-amd64
           - runner: ubuntu-24.04-arm
+            runner_self: ubuntu-24.04-arm
             suffix: linux-arm64
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner_self }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libpcap
+      - name: Install libpcap (GitHub-hosted only)
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       - name: Set up Go
@@ -112,7 +121,7 @@ jobs:
 
   publish:
     needs: [build-linux, build-macos]
-    runs-on: ubuntu-latest
+    runs-on: nc3
     steps:
       - uses: actions/checkout@v4
         with:
